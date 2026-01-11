@@ -171,7 +171,7 @@ int GridEditor::findSectorAt(const QPointF &worldPos)
     // If tied, return the one with smallest area (most specific)
     
     int bestSector = candidateSectors[0];
-    int maxNestingLevel = m_mapData->sectors[bestSector].nesting_level;
+    // Removed: nesting level check (v9 format is flat)
     
     // Calculate area of first candidate
     float minArea = 0.0f;
@@ -186,7 +186,7 @@ int GridEditor::findSectorAt(const QPointF &worldPos)
     for (int i = 1; i < candidateSectors.size(); i++) {
         int sectorIdx = candidateSectors[i];
         const Sector &sector = m_mapData->sectors[sectorIdx];
-        int nestingLevel = sector.nesting_level;
+        // Removed: nestingLevel check
         
         // Calculate area using shoelace formula
         float area = 0.0f;
@@ -197,11 +197,9 @@ int GridEditor::findSectorAt(const QPointF &worldPos)
         }
         area = std::abs(area) / 2.0f;
         
-        // Prefer higher nesting level, or smaller area if tied
-        if (nestingLevel > maxNestingLevel || 
-            (nestingLevel == maxNestingLevel && area < minArea)) {
+        // Prefer smaller area if tied (most specific sector)
+        if (area < minArea) {
             bestSector = sectorIdx;
-            maxNestingLevel = nestingLevel;
             minArea = area;
         }
     }
@@ -292,6 +290,28 @@ int GridEditor::findVertexAt(const QPointF &worldPos, int &sectorId, float toler
     }
     
     return closestVertex;
+}
+
+int GridEditor::findSpawnFlagAt(const QPointF &worldPos, float tolerance)
+{
+    if (!m_mapData) return -1;
+    
+    float minDist = tolerance / m_zoom;
+    int closestFlag = -1;
+    
+    for (int i = 0; i < m_mapData->spawnFlags.size(); i++) {
+        const SpawnFlag &flag = m_mapData->spawnFlags[i];
+        float dx = worldPos.x() - flag.x;
+        float dy = worldPos.y() - flag.y;
+        float dist = std::sqrt(dx * dx + dy * dy);
+        
+        if (dist < minDist) {
+            minDist = dist;
+            closestFlag = i;
+        }
+    }
+    
+    return closestFlag;
 }
 
 float GridEditor::pointToLineDistance(const QPointF &point, const QPointF &lineStart, const QPointF &lineEnd) const
@@ -676,7 +696,11 @@ void GridEditor::mousePressEvent(QMouseEvent *event)
                 break;
             }
                 
-
+            case MODE_PLACE_DECAL_FLOOR:
+            case MODE_PLACE_DECAL_CEILING:
+                emit decalPlaced(worldPos.x(), worldPos.y());
+                update();
+                break;
 
             case MODE_MANUAL_PORTAL: {
                 int wallIdx = findWallAt(worldPos);
@@ -835,6 +859,25 @@ void GridEditor::wheelEvent(QWheelEvent *event)
 void GridEditor::contextMenuEvent(QContextMenuEvent *event)
 {
     QPointF worldPos = screenToWorld(event->pos());
+    
+    // Check for spawn flag first (higher priority)
+    int flagIdx = findSpawnFlagAt(worldPos, 15.0f);
+    if (flagIdx >= 0 && m_mapData) {
+        const SpawnFlag &flag = m_mapData->spawnFlags[flagIdx];
+        
+        QMenu menu(this);
+        QAction *deleteAction = menu.addAction(tr("Eliminar Spawn Flag (ID %1)").arg(flag.flagId));
+        
+        QAction *selectedItem = menu.exec(event->globalPos());
+        if (selectedItem == deleteAction) {
+            m_mapData->spawnFlags.removeAt(flagIdx);
+            emit mapChanged();
+            update();
+        }
+        return;
+    }
+    
+    // Check for wall/portal
     int wallIdx = findWallAt(worldPos);
     
     // Check if we hit a wall in any sector (findWallAt updates m_selectedSector if found)

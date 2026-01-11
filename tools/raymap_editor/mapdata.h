@@ -71,38 +71,20 @@ struct Sector {
     /* Iluminación */
     int light_level;
     
+    /* Jerarquía de sectores anidados */
+    int parent_sector_id;              // -1 = root, >=0 = parent sector ID
+    QVector<int> child_sector_ids;     // List of child sector IDs
+    
     /* ========================================================================
-       SECTORES ANIDADOS (Nested Sectors) - Versión 9+
+       SECTORES ANIDADOS (Nested Sectors) - REMOVED (v9 is flat)
        ======================================================================== */
-    
-    /* Jerarquía */
-    int parent_sector_id;           // -1 = sector raíz, >=0 = ID del sector padre
-    QVector<int> child_sector_ids;  // IDs de sectores hijos
-    
-    /* Tipo de sector */
-    enum SectorType {
-        ROOT = 0,           // Sector raíz (sin padre)
-        NESTED_ROOM = 1,    // Habitación dentro de otra (hueca)
-        NESTED_COLUMN = 2,  // Columna/pilar (sólido)
-        NESTED_BOX = 3      // Caja/objeto (sólido, altura limitada)
-    };
-    SectorType sector_type;
-    
-    /* Propiedades de anidamiento */
-    bool is_solid;          // true = sólido (columna/caja), false = hueco (habitación)
-    int nesting_level;      // Nivel de profundidad (0 = raíz, 1 = hijo directo, etc.)
     
     /* Constructor */
     Sector() : sector_id(0), floor_z(0.0f), ceiling_z(256.0f),
                floor_texture_id(0), ceiling_texture_id(0), light_level(255),
-               parent_sector_id(-1), sector_type(ROOT), is_solid(false), nesting_level(0) {}
-    
-    /* Helper methods */
-    bool isRoot() const { return parent_sector_id == -1; }
-    bool hasChildren() const { return !child_sector_ids.isEmpty(); }
-    bool isNested() const { return parent_sector_id >= 0; }
-    bool isSolid() const { return is_solid; }
+               parent_sector_id(-1) {}
 };
+
 
 /* ============================================================================
    PORTAL - Conexión entre sectores
@@ -146,6 +128,32 @@ struct SpawnFlag {
 };
 
 /* ============================================================================
+   DECAL - Overlay texture for floors/ceilings
+   ============================================================================ */
+
+struct Decal {
+    int id;                     // Unique decal ID
+    int sector_id;              // Sector this decal belongs to
+    bool is_floor;              // true = floor, false = ceiling
+    
+    // Position and size (world coordinates)
+    float x, y;                 // Center position
+    float width, height;        // Dimensions
+    float rotation;             // Rotation in radians
+    
+    // Texture
+    int texture_id;             // Texture ID from FPG
+    
+    // Rendering
+    float alpha;                // Transparency (0.0 = invisible, 1.0 = opaque)
+    int render_order;           // Render order (higher = on top)
+    
+    Decal() : id(0), sector_id(-1), is_floor(true),
+              x(0), y(0), width(100), height(100), rotation(0),
+              texture_id(0), alpha(1.0f), render_order(0) {}
+};
+
+/* ============================================================================
    CAMERA
    ============================================================================ */
 
@@ -172,6 +180,9 @@ struct MapData {
     
     /* Spawn Flags */
     QVector<SpawnFlag> spawnFlags;
+    
+    /* Decals */
+    QVector<Decal> decals;
     
     /* Cámara */
     CameraData camera;
@@ -213,6 +224,15 @@ struct MapData {
         return maxId + 1;
     }
     
+    /* Helper: Get next decal ID */
+    int getNextDecalId() const {
+        int maxId = -1;
+        for (const Decal &d : decals) {
+            if (d.id > maxId) maxId = d.id;
+        }
+        return maxId + 1;
+    }
+    
     /* Helper: Find sector by ID */
     Sector* findSector(int sector_id) {
         for (Sector &s : sectors) {
@@ -225,6 +245,14 @@ struct MapData {
     Portal* findPortal(int portal_id) {
         for (Portal &p : portals) {
             if (p.portal_id == portal_id) return &p;
+        }
+        return nullptr;
+    }
+    
+    /* Helper: Find decal by ID */
+    Decal* findDecal(int decal_id) {
+        for (Decal &d : decals) {
+            if (d.id == decal_id) return &d;
         }
         return nullptr;
     }

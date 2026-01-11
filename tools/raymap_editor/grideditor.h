@@ -30,6 +30,8 @@ public:
         MODE_PLACE_SPAWN,      // Place spawn flags
         MODE_PLACE_CAMERA,     // Place camera
         MODE_SELECT_SECTOR,    // Select sector
+        MODE_PLACE_DECAL_FLOOR,   // Place floor decal
+        MODE_PLACE_DECAL_CEILING, // Place ceiling decal
         MODE_MANUAL_PORTAL     // Link portals manually
     };
     void setEditMode(EditMode mode);
@@ -58,6 +60,7 @@ signals:
     void mapChanged(); // Emitted when geometry changes (dragging)
     void cameraPlaced(float x, float y);
     void spawnFlagPlaced(int flagId, float x, float y);
+    void decalPlaced(float x, float y);
     
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -120,6 +123,7 @@ private:
     int findSectorAt(const QPointF &worldPos);
     int findWallAt(const QPointF &worldPos, float tolerance = 10.0f);
     int findVertexAt(const QPointF &worldPos, int &sectorId, float tolerance = 10.0f);
+    int findSpawnFlagAt(const QPointF &worldPos, float tolerance = 10.0f);
 };
 
 #endif // GRIDEDITOR_H

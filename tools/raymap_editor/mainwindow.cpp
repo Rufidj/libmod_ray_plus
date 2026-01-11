@@ -8,14 +8,21 @@
 #include "fpgloader.h"
 #include "grideditor.h" // Added based on instruction
 #include "wldimporter.h"  // WLD import support
+#include "insertboxdialog.h"  // Insert Box dialog
 #include <QMenuBar>
+#include "fpgeditor.h"
+#include "effectgeneratordialog.h"
+#include "camerapatheditor.h"
 #include <QToolBar>
 #include <QStatusBar>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QSettings>
+#include <QFileInfo>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QApplication>
@@ -32,7 +39,9 @@ MainWindow::MainWindow(QWidget *parent)
     , m_currentFPG(0)
     , m_selectedSectorId(-1)
     , m_selectedWallId(-1)
+    , m_selectedDecalId(-1)
     , m_visualModeWidget(nullptr)
+    , m_fpgEditor(nullptr)
 {
     setWindowTitle("RayMap Editor - Geometric Sectors");
     resize(1280, 800);
@@ -51,6 +60,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_gridEditor, &GridEditor::portalWallSelected, this, &MainWindow::onManualPortalWallSelected); 
     connect(m_gridEditor, &GridEditor::requestDeletePortal, this, &MainWindow::onDeletePortal); // NEW
     connect(m_gridEditor, &GridEditor::mapChanged, this, &MainWindow::updateVisualMode);
+    connect(m_gridEditor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced);
     
     // Create UI
     createActions();
@@ -130,6 +140,14 @@ void MainWindow::createMenus()
     
     fileMenu->addSeparator();
     fileMenu->addAction(m_loadFPGAction);
+    
+    // Recent files submenus
+    fileMenu->addSeparator();
+    m_recentMapsMenu = fileMenu->addMenu(tr("Mapas Recientes"));
+    m_recentFPGsMenu = fileMenu->addMenu(tr("FPGs Recientes"));
+    updateRecentMapsMenu();
+    updateRecentFPGsMenu();
+    
     fileMenu->addSeparator();
     fileMenu->addAction(m_exitAction);
     
@@ -139,6 +157,76 @@ void MainWindow::createMenus()
     viewMenu->addAction(m_zoomResetAction);
     viewMenu->addSeparator();
     viewMenu->addAction(m_visualModeAction);
+    
+    // Insert Menu
+    QMenu *insertMenu = menuBar()->addMenu(tr("&Insertar"));
+    
+    // Insert Box
+    m_insertBoxAction = new QAction(QIcon::fromTheme("insert-object"), tr("Caja"), this);
+    m_insertBoxAction->setShortcut(QKeySequence(tr("Ctrl+B")));
+    m_insertBoxAction->setToolTip(tr("Insertar una caja rectangular dentro del sector actual.\nCrea automáticamente el sector y los portales necesarios."));
+    m_insertBoxAction->setStatusTip(tr("Insertar caja con portales automáticos"));
+    connect(m_insertBoxAction, &QAction::triggered, this, &MainWindow::onInsertBox);
+    insertMenu->addAction(m_insertBoxAction);
+    
+    // Insert Column
+    m_insertColumnAction = new QAction(QIcon::fromTheme("insert-object"), tr("Columna"), this);
+    m_insertColumnAction->setShortcut(QKeySequence(tr("Ctrl+L")));
+    m_insertColumnAction->setToolTip(tr("Insertar una columna (caja pequeña) dentro del sector actual.\nÚtil para pilares y soportes."));
+    m_insertColumnAction->setStatusTip(tr("Insertar columna"));
+    connect(m_insertColumnAction, &QAction::triggered, this, &MainWindow::onInsertColumn);
+    insertMenu->addAction(m_insertColumnAction);
+    
+    // Insert Platform
+    m_insertPlatformAction = new QAction(QIcon::fromTheme("go-up"), tr("Plataforma"), this);
+    m_insertPlatformAction->setShortcut(QKeySequence(tr("Ctrl+P")));
+    m_insertPlatformAction->setToolTip(tr("Insertar una plataforma elevada dentro del sector actual.\nCrea un sector con suelo más alto."));
+    m_insertPlatformAction->setStatusTip(tr("Insertar plataforma elevada"));
+    connect(m_insertPlatformAction, &QAction::triggered, this, &MainWindow::onInsertPlatform);
+    insertMenu->addAction(m_insertPlatformAction);
+    
+    insertMenu->addSeparator();
+    
+    // Sector Menu
+    QMenu *sectorMenu = menuBar()->addMenu(tr("&Sector"));
+    QAction *setParentAction = new QAction(tr("Asignar Sector Padre..."), this);
+    setParentAction->setShortcut(QKeySequence(tr("Ctrl+P")));
+    connect(setParentAction, &QAction::triggered, this, &MainWindow::onSetParentSector);
+    sectorMenu->addAction(setParentAction);
+    
+    // Tools Menu
+    QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
+    QAction *fpgEditorAction = new QAction(tr("FPG Editor..."), this);
+    fpgEditorAction->setShortcut(QKeySequence(tr("Ctrl+F")));
+    fpgEditorAction->setStatusTip(tr("Open FPG texture editor"));
+    connect(fpgEditorAction, &QAction::triggered, this, &MainWindow::onOpenFPGEditor);
+    toolsMenu->addAction(fpgEditorAction);
+    
+    QAction *effectGenAction = new QAction(tr("Generador de Efectos..."), this);
+    effectGenAction->setShortcut(QKeySequence(tr("Ctrl+E")));
+    connect(effectGenAction, &QAction::triggered, this, &MainWindow::onOpenEffectGenerator);
+    toolsMenu->addAction(effectGenAction);
+    
+    QAction *cameraPathAction = new QAction(tr("Editor de Cámaras..."), this);
+    cameraPathAction->setShortcut(QKeySequence(tr("Ctrl+Shift+C")));
+    connect(cameraPathAction, &QAction::triggered, this, &MainWindow::onOpenCameraPathEditor);
+    toolsMenu->addAction(cameraPathAction);
+    
+    // Future tools (disabled for now)
+    m_insertDoorAction = new QAction(QIcon::fromTheme("door-open"), tr("Puerta (Próximamente)"), this);
+    m_insertDoorAction->setEnabled(false);
+    m_insertDoorAction->setToolTip(tr("Insertar una puerta deslizante o giratoria.\n[Función en desarrollo]"));
+    insertMenu->addAction(m_insertDoorAction);
+    
+    m_insertElevatorAction = new QAction(QIcon::fromTheme("go-jump"), tr("Ascensor (Próximamente)"), this);
+    m_insertElevatorAction->setEnabled(false);
+    m_insertElevatorAction->setToolTip(tr("Insertar un ascensor o plataforma móvil.\n[Función en desarrollo]"));
+    insertMenu->addAction(m_insertElevatorAction);
+    
+    m_insertStairsAction = new QAction(QIcon::fromTheme("go-up"), tr("Escalera (Próximamente)"), this);
+    m_insertStairsAction->setEnabled(false);
+    m_insertStairsAction->setToolTip(tr("Insertar una escalera con múltiples escalones.\n[Función en desarrollo]"));
+    insertMenu->addAction(m_insertStairsAction);
 }
 
 void MainWindow::createToolbars()
@@ -155,6 +243,8 @@ void MainWindow::createToolbars()
     m_modeCombo->addItem("Colocar Spawn");
     m_modeCombo->addItem("Colocar Cámara");
     m_modeCombo->addItem("Seleccionar Sector"); // New option
+    // m_modeCombo->addItem("Colocar Decal Suelo");  // DISABLED - Use FPG Editor instead
+    // m_modeCombo->addItem("Colocar Decal Techo");  // DISABLED - Use FPG Editor instead
     connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onModeChanged);
     toolbar->addWidget(m_modeCombo);
@@ -229,7 +319,7 @@ void MainWindow::createDockWindows()
     QHBoxLayout *floorLayout = new QHBoxLayout();
     floorLayout->addWidget(new QLabel(tr("Suelo Z:")));
     m_sectorFloorZSpin = new QDoubleSpinBox();
-    m_sectorFloorZSpin->setRange(-1000, 1000);
+    m_sectorFloorZSpin->setRange(-100000, 100000);
     m_sectorFloorZSpin->setValue(0);
     connect(m_sectorFloorZSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &MainWindow::onSectorFloorZChanged);
@@ -239,7 +329,7 @@ void MainWindow::createDockWindows()
     QHBoxLayout *ceilingLayout = new QHBoxLayout();
     ceilingLayout->addWidget(new QLabel(tr("Techo Z:")));
     m_sectorCeilingZSpin = new QDoubleSpinBox();
-    m_sectorCeilingZSpin->setRange(-1000, 1000);
+    m_sectorCeilingZSpin->setRange(-100000, 100000);
     m_sectorCeilingZSpin->setValue(256);
     connect(m_sectorCeilingZSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &MainWindow::onSectorCeilingZChanged);
@@ -283,45 +373,7 @@ void MainWindow::createDockWindows()
     textureGroup->setLayout(textureLayout);
     sectorLayout->addWidget(textureGroup);
     
-    // Nested Sector Group (NEW)
-    QGroupBox *nestedGroup = new QGroupBox(tr("Sector Anidado"));
-    QVBoxLayout *nestedLayout = new QVBoxLayout();
-    
-    // Parent sector selector
-    QHBoxLayout *parentLayout = new QHBoxLayout();
-    parentLayout->addWidget(new QLabel(tr("Padre:")));
-    m_sectorParentCombo = new QComboBox();
-    m_sectorParentCombo->addItem(tr("(Ninguno - Raíz)"), -1);
-    connect(m_sectorParentCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &MainWindow::onSectorParentChanged);
-    parentLayout->addWidget(m_sectorParentCombo);
-    nestedLayout->addLayout(parentLayout);
-    
-    // Sector type selector
-    QHBoxLayout *typeLayout = new QHBoxLayout();
-    typeLayout->addWidget(new QLabel(tr("Tipo:")));
-    m_sectorTypeCombo = new QComboBox();
-    m_sectorTypeCombo->addItem(tr("Raíz"), Sector::ROOT);
-    m_sectorTypeCombo->addItem(tr("Habitación"), Sector::NESTED_ROOM);
-    m_sectorTypeCombo->addItem(tr("Columna"), Sector::NESTED_COLUMN);
-    m_sectorTypeCombo->addItem(tr("Caja"), Sector::NESTED_BOX);
-    connect(m_sectorTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &MainWindow::onSectorTypeChanged);
-    typeLayout->addWidget(m_sectorTypeCombo);
-    nestedLayout->addLayout(typeLayout);
-    
-    // Solid checkbox
-    m_sectorSolidCheckbox = new QCheckBox(tr("Sólido (bloquea movimiento)"));
-    connect(m_sectorSolidCheckbox, &QCheckBox::toggled,
-            this, &MainWindow::onSectorSolidChanged);
-    nestedLayout->addWidget(m_sectorSolidCheckbox);
-    
-    // Nesting level display
-    m_sectorNestingLevelLabel = new QLabel(tr("Nivel: 0"));
-    nestedLayout->addWidget(m_sectorNestingLevelLabel);
-    
-    nestedGroup->setLayout(nestedLayout);
-    sectorLayout->addWidget(nestedGroup);
+
     
     sectorLayout->addStretch();
     sectorWidget->setLayout(sectorLayout);
@@ -466,6 +518,94 @@ void MainWindow::createDockWindows()
             this, &MainWindow::onSectorListContextMenu);
     m_sectorListDock->setWidget(m_sectorListWidget);
     addDockWidget(Qt::LeftDockWidgetArea, m_sectorListDock);
+    
+    /* DECAL DOCK DISABLED - Replaced by FPG Editor
+    // Decal Properties Dock
+    m_decalDock = new QDockWidget(tr("Propiedades del Decal"), this);
+    QWidget *decalWidget = new QWidget();
+    QFormLayout *decalLayout = new QFormLayout();
+    
+    m_decalIdLabel = new QLabel(tr("Ninguno"));
+    decalLayout->addRow(tr("ID:"), m_decalIdLabel);
+    
+    m_decalXSpin = new QDoubleSpinBox();
+    m_decalXSpin->setRange(-100000, 100000);
+    m_decalXSpin->setDecimals(1);
+    connect(m_decalXSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onDecalXChanged);
+    decalLayout->addRow(tr("Posición X:"), m_decalXSpin);
+    
+    m_decalYSpin = new QDoubleSpinBox();
+    m_decalYSpin->setRange(-100000, 100000);
+    m_decalYSpin->setDecimals(1);
+    connect(m_decalYSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onDecalYChanged);
+    decalLayout->addRow(tr("Posición Y:"), m_decalYSpin);
+    
+    m_decalWidthSpin = new QDoubleSpinBox();
+    m_decalWidthSpin->setRange(1, 10000);
+    m_decalWidthSpin->setValue(100);
+    m_decalWidthSpin->setDecimals(1);
+    connect(m_decalWidthSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onDecalWidthChanged);
+    decalLayout->addRow(tr("Ancho:"), m_decalWidthSpin);
+    
+    m_decalHeightSpin = new QDoubleSpinBox();
+    m_decalHeightSpin->setRange(1, 10000);
+    m_decalHeightSpin->setValue(100);
+    m_decalHeightSpin->setDecimals(1);
+    connect(m_decalHeightSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onDecalHeightChanged);
+    decalLayout->addRow(tr("Alto:"), m_decalHeightSpin);
+    
+    m_decalRotationSpin = new QDoubleSpinBox();
+    m_decalRotationSpin->setRange(0, 360);
+    m_decalRotationSpin->setSuffix("°");
+    m_decalRotationSpin->setDecimals(1);
+    connect(m_decalRotationSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onDecalRotationChanged);
+    decalLayout->addRow(tr("Rotación:"), m_decalRotationSpin);
+    
+    QHBoxLayout *decalTexLayout = new QHBoxLayout();
+    m_decalTextureSpin = new QSpinBox();
+    m_decalTextureSpin->setRange(0, 9999);
+    connect(m_decalTextureSpin, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &MainWindow::onDecalTextureChanged);
+    decalTexLayout->addWidget(m_decalTextureSpin);
+    
+    QPushButton *selectDecalTexBtn = new QPushButton(tr("..."));
+    selectDecalTexBtn->setMaximumWidth(30);
+    connect(selectDecalTexBtn, &QPushButton::clicked,
+            this, &MainWindow::onSelectDecalTexture);
+    decalTexLayout->addWidget(selectDecalTexBtn);
+    decalLayout->addRow(tr("Textura:"), decalTexLayout);
+    
+    m_decalAlphaSpin = new QDoubleSpinBox();
+    m_decalAlphaSpin->setRange(0.0, 1.0);
+    m_decalAlphaSpin->setValue(1.0);
+    m_decalAlphaSpin->setSingleStep(0.1);
+    m_decalAlphaSpin->setDecimals(2);
+    connect(m_decalAlphaSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onDecalAlphaChanged);
+    decalLayout->addRow(tr("Opacidad:"), m_decalAlphaSpin);
+    
+    m_decalRenderOrderSpin = new QSpinBox();
+    m_decalRenderOrderSpin->setRange(-100, 100);
+    m_decalRenderOrderSpin->setValue(0);
+    connect(m_decalRenderOrderSpin, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &MainWindow::onDecalRenderOrderChanged);
+    decalLayout->addRow(tr("Orden:"), m_decalRenderOrderSpin);
+    
+    m_deleteDecalButton = new QPushButton(tr("Eliminar Decal"));
+    connect(m_deleteDecalButton, &QPushButton::clicked,
+            this, &MainWindow::onDeleteDecal);
+    decalLayout->addRow(m_deleteDecalButton);
+    
+    decalWidget->setLayout(decalLayout);
+    m_decalDock->setWidget(decalWidget);
+    addDockWidget(Qt::RightDockWidgetArea, m_decalDock);
+    m_decalDock->hide(); // Hidden by default
+    */
 }
 
 void MainWindow::createStatusBar()
@@ -484,6 +624,9 @@ void MainWindow::onNewMap()
     m_currentMapFile.clear();
     m_gridEditor->setMapData(&m_mapData);
     updateWindowTitle();
+    
+    // Clear sector list UI
+    m_sectorListWidget->clear();
     
     // Sync UI
     m_skyboxSpin->blockSignals(true);
@@ -531,6 +674,7 @@ void MainWindow::onSaveMap()
     }
     
     if (RayMapFormat::saveMap(m_currentMapFile, m_mapData)) {
+        addToRecentMaps(m_currentMapFile);
         m_statusLabel->setText(tr("Map saved: %1").arg(m_currentMapFile));
     } else {
         QMessageBox::critical(this, tr("Error"), tr("Failed to save map"));
@@ -558,6 +702,7 @@ void MainWindow::onSaveMapAs()
     if (RayMapFormat::saveMap(filename, m_mapData)) {
         m_currentMapFile = filename;
         updateWindowTitle();
+        addToRecentMaps(filename);
         m_statusLabel->setText(tr("Map saved: %1").arg(filename));
     } else {
         QMessageBox::critical(this, tr("Error"), tr("Failed to save map"));
@@ -660,6 +805,8 @@ void MainWindow::onLoadFPG()
             m_textureCache[entry.id] = entry.pixmap;
         }
         
+        addToRecentFPGs(filename);
+        m_currentFPGPath = filename;  // Store FPG path for editor
         m_statusLabel->setText(tr("FPG loaded: %1 textures from %2")
                               .arg(textures.size()).arg(filename));
     } else {
@@ -672,6 +819,149 @@ void MainWindow::onLoadFPG()
 void MainWindow::onExit()
 {
     close();
+}
+
+// ============================================================================
+// RECENT FILES
+// ============================================================================
+
+void MainWindow::updateRecentMapsMenu()
+{
+    m_recentMapsMenu->clear();
+    
+    QSettings settings("BennuGD", "RayMapEditor");
+    QStringList recentMaps = settings.value("recentMaps").toStringList();
+    
+    for (const QString &file : recentMaps) {
+        if (QFile::exists(file)) {
+            QAction *action = m_recentMapsMenu->addAction(QFileInfo(file).fileName());
+            action->setData(file);
+            action->setToolTip(file);
+            connect(action, &QAction::triggered, this, &MainWindow::openRecentMap);
+        }
+    }
+    
+    if (m_recentMapsMenu->isEmpty()) {
+        m_recentMapsMenu->addAction(tr("(Ninguno)"))->setEnabled(false);
+    }
+}
+
+void MainWindow::updateRecentFPGsMenu()
+{
+    m_recentFPGsMenu->clear();
+    
+    QSettings settings("BennuGD", "RayMapEditor");
+    QStringList recentFPGs = settings.value("recentFPGs").toStringList();
+    
+    for (const QString &file : recentFPGs) {
+        if (QFile::exists(file)) {
+            QAction *action = m_recentFPGsMenu->addAction(QFileInfo(file).fileName());
+            action->setData(file);
+            action->setToolTip(file);
+            connect(action, &QAction::triggered, this, &MainWindow::openRecentFPG);
+        }
+    }
+    
+    if (m_recentFPGsMenu->isEmpty()) {
+        m_recentFPGsMenu->addAction(tr("(Ninguno)"))->setEnabled(false);
+    }
+}
+
+void MainWindow::addToRecentMaps(const QString &filename)
+{
+    QSettings settings("BennuGD", "RayMapEditor");
+    QStringList recentMaps = settings.value("recentMaps").toStringList();
+    
+    recentMaps.removeAll(filename);  // Remove if already exists
+    recentMaps.prepend(filename);    // Add to front
+    
+    while (recentMaps.size() > 10) {  // Keep only 10 most recent
+        recentMaps.removeLast();
+    }
+    
+    settings.setValue("recentMaps", recentMaps);
+    updateRecentMapsMenu();
+}
+
+void MainWindow::addToRecentFPGs(const QString &filename)
+{
+    QSettings settings("BennuGD", "RayMapEditor");
+    QStringList recentFPGs = settings.value("recentFPGs").toStringList();
+    
+    recentFPGs.removeAll(filename);
+    recentFPGs.prepend(filename);
+    
+    while (recentFPGs.size() > 10) {
+        recentFPGs.removeLast();
+    }
+    
+    settings.setValue("recentFPGs", recentFPGs);
+    updateRecentFPGsMenu();
+}
+
+void MainWindow::openRecentMap()
+{
+    QAction *action = qobject_cast<QAction*>(sender());
+    if (!action) return;
+    
+    QString filename = action->data().toString();
+    if (RayMapFormat::loadMap(filename, m_mapData)) {
+        m_currentMapFile = filename;
+        updateWindowTitle();
+        m_gridEditor->setMapData(&m_mapData);
+        updateSectorList();
+        updateVisualMode();
+        addToRecentMaps(filename);
+        m_statusLabel->setText(tr("Mapa cargado: %1").arg(QFileInfo(filename).fileName()));
+    }
+}
+
+void MainWindow::openRecentFPG()
+{
+    QAction *action = qobject_cast<QAction*>(sender());
+    if (!action) return;
+    
+    QString filename = action->data().toString();
+    
+    // Reload FPG using the same logic as onLoadFPG
+    QVector<TextureEntry> textures;
+    
+    // Load FPG with progress callback
+    bool success = FPGLoader::loadFPG(filename, textures, 
+        [this](int current, int total, const QString &name) {
+            m_statusLabel->setText(tr("Cargando FPG: %1/%2 - %3")
+                                  .arg(current).arg(total).arg(name));
+            qApp->processEvents();
+        });
+    
+    if (success) {
+        // Convert to texture map
+        QMap<int, QPixmap> textureMap = FPGLoader::getTextureMap(textures);
+        
+        // Store textures in map data
+        m_mapData.textures.clear();
+        for (const TextureEntry &entry : textures) {
+            m_mapData.textures.append(entry);
+        }
+        
+        // Update grid editor
+        m_gridEditor->setTextures(textureMap);
+        
+        // Cache textures for selector
+        m_textureCache.clear();
+        for (const TextureEntry &entry : textures) {
+            m_textureCache[entry.id] = entry.pixmap;
+        }
+        
+        addToRecentFPGs(filename);
+        m_statusLabel->setText(tr("FPG cargado: %1 texturas desde %2")
+                              .arg(textures.size()).arg(QFileInfo(filename).fileName()));
+        updateVisualMode();
+    } else {
+        QMessageBox::critical(this, tr("Error"), 
+                            tr("No se pudo cargar el archivo FPG: %1").arg(filename));
+        m_statusLabel->setText(tr("Error al cargar FPG"));
+    }
 }
 
 /* ============================================================================
@@ -1057,13 +1347,16 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
         
         Wall &wall = sector.walls[wallIndex];
         
-        // Check if already has a portal? (Ideally we allow editing/overwriting, but warn?)
+        // NOTE: Build Engine allows multiple portals per wall
+        // We allow overwriting/adding portals without warning
+        /* REMOVED: Single portal per wall restriction
         if (wall.portal_id >= 0) {
             int ret = QMessageBox::question(this, tr("Portal Existente"), 
                 tr("Esta pared ya tiene un portal (ID %1). ¿Quieres reemplazarlo?").arg(wall.portal_id),
                 QMessageBox::Yes | QMessageBox::No);
             if (ret == QMessageBox::No) return;
         }
+        */
 
         m_pendingPortalSector = sectorIndex;
         m_pendingPortalWall = wallIndex;
@@ -1091,13 +1384,15 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
         Sector &secB = m_mapData.sectors[sectorIndex];
         Wall &wallB = secB.walls[wallIndex];
         
-        // Validation: Overwrite target portal?
+        // NOTE: Build Engine allows multiple portals per wall
+        /* REMOVED: Single portal per wall restriction
         if (wallB.portal_id >= 0) {
             int ret = QMessageBox::question(this, tr("Portal Existente"), 
                 tr("La pared destino ya tiene un portal (ID %1). ¿Quieres reemplazarlo?").arg(wallB.portal_id),
                 QMessageBox::Yes | QMessageBox::No);
              if (ret == QMessageBox::No) return;
         }
+        */
         
         // Create Portal Data
         Portal portal;
@@ -1421,28 +1716,8 @@ void MainWindow::updateSectorPanel()
         m_sectorFloorTextureSpin->blockSignals(false);
         m_sectorCeilingTextureSpin->blockSignals(false);
         
-        // Update nested sector controls
-        m_sectorParentCombo->blockSignals(true);
-        m_sectorParentCombo->clear();
-        m_sectorParentCombo->addItem(tr("(Ninguno - Raíz)"), -1);
-        for (const Sector &s : m_mapData.sectors) {
-            if (s.sector_id != m_selectedSectorId) {
-                m_sectorParentCombo->addItem(tr("Sector %1").arg(s.sector_id), s.sector_id);
-            }
-        }
-        int parentIndex = m_sectorParentCombo->findData(sector.parent_sector_id);
-        if (parentIndex >= 0) m_sectorParentCombo->setCurrentIndex(parentIndex);
-        m_sectorParentCombo->blockSignals(false);
+        // Removed nested sector controls update (v9 format is flat)
         
-        m_sectorTypeCombo->blockSignals(true);
-        m_sectorTypeCombo->setCurrentIndex(static_cast<int>(sector.sector_type));
-        m_sectorTypeCombo->blockSignals(false);
-        
-        m_sectorSolidCheckbox->blockSignals(true);
-        m_sectorSolidCheckbox->setChecked(sector.is_solid);
-        m_sectorSolidCheckbox->blockSignals(false);
-        
-        m_sectorNestingLevelLabel->setText(tr("Nivel: %1").arg(sector.nesting_level));
     } else {
         m_sectorIdLabel->setText(tr("No sector selected"));
     }
@@ -1486,82 +1761,7 @@ void MainWindow::updateWallPanel()
    NESTED SECTOR SLOTS
    ============================================================================ */
 
-void MainWindow::onSectorParentChanged(int index)
-{
-    if (m_selectedSectorId < 0) return;
-    
-    int parentId = m_sectorParentCombo->itemData(index).toInt();
-    
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            if (sector.parent_sector_id >= 0) {
-                for (Sector &s : m_mapData.sectors) {
-                    if (s.sector_id == sector.parent_sector_id) {
-                        s.child_sector_ids.removeAll(m_selectedSectorId);
-                        break;
-                    }
-                }
-            }
-            
-            sector.parent_sector_id = parentId;
-            
-            if (parentId >= 0) {
-                for (Sector &s : m_mapData.sectors) {
-                    if (s.sector_id == parentId) {
-                        if (!s.child_sector_ids.contains(m_selectedSectorId)) {
-                            s.child_sector_ids.append(m_selectedSectorId);
-                        }
-                        sector.nesting_level = s.nesting_level + 1;
-                        break;
-                    }
-                }
-            } else {
-                sector.nesting_level = 0;
-            }
-            
-            m_sectorNestingLevelLabel->setText(tr("Nivel: %1").arg(sector.nesting_level));
-            m_gridEditor->update();
-            return;
-        }
-    }
-}
 
-void MainWindow::onSectorTypeChanged(int index)
-{
-    if (m_selectedSectorId < 0) return;
-    
-    Sector::SectorType newType = static_cast<Sector::SectorType>(m_sectorTypeCombo->itemData(index).toInt());
-    
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            sector.sector_type = newType;
-            
-            if (newType == Sector::NESTED_COLUMN || newType == Sector::NESTED_BOX) {
-                sector.is_solid = true;
-                m_sectorSolidCheckbox->setChecked(true);
-            } else if (newType == Sector::NESTED_ROOM) {
-                sector.is_solid = false;
-                m_sectorSolidCheckbox->setChecked(false);
-            }
-            
-            m_gridEditor->update();
-            return;
-        }
-    }
-}
-
-void MainWindow::onSectorSolidChanged(bool checked)
-{
-    if (m_selectedSectorId < 0) return;
-    
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            sector.is_solid = checked;
-            m_gridEditor->update();
-            return;
-        }
-    }
-}
 
 /* ============================================================================
    SECTOR LIST
@@ -1576,26 +1776,14 @@ void MainWindow::updateSectorList()
     for (const Sector &sector : m_mapData.sectors) {
         QString itemText;
         
-        // Indent based on nesting level
-        for (int i = 0; i < sector.nesting_level; i++) {
-            itemText += "  ";
-        }
+        // Indent based on nesting level - REMOVED (v9 is flat)
+        // for (int i = 0; i < sector.nesting_level; i++) {
+        //     itemText += "  ";
+        // }
         
         itemText += QString("Sector %1").arg(sector.sector_id);
         
-        switch (sector.sector_type) {
-            case Sector::NESTED_ROOM:
-                itemText += " [Habitación]";
-                break;
-            case Sector::NESTED_COLUMN:
-                itemText += " [Columna]";
-                break;
-            case Sector::NESTED_BOX:
-                itemText += " [Caja]";
-                break;
-            default:
-                break;
-        }
+        // Removed sector type suffix (v9 is flat)
         
         QListWidgetItem *item = new QListWidgetItem(itemText);
         item->setData(Qt::UserRole, sector.sector_id);
@@ -1922,6 +2110,318 @@ void MainWindow::onCreateCircle()
 }
 
 /* ============================================================================
+   INSERT TOOLS (HIGH-LEVEL GEOMETRY CREATION)
+   ============================================================================ */
+
+void MainWindow::onInsertBox()
+{
+    // Show configuration dialog with texture previews
+    InsertBoxDialog dialog(m_textureCache, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    
+    // Get configuration
+    float width = dialog.getWidth();
+    float height = dialog.getHeight();
+    float floorZ = dialog.getFloorZ();
+    float ceilingZ = dialog.getCeilingZ();
+    int wallTexture = dialog.getWallTexture();
+    int floorTexture = dialog.getFloorTexture();
+    int ceilingTexture = dialog.getCeilingTexture();
+    
+    // Ask user to click where to place the box
+    QMessageBox::information(this, tr("Colocar Caja"),
+        tr("Haz clic en el mapa donde quieres colocar el centro de la caja."));
+    
+    // TODO: Implement click-to-place workflow
+    // For now, place at origin as a test
+    float centerX = 0.0f;
+    float centerY = 0.0f;
+    
+    // Create new sector
+    Sector newSector;
+    newSector.sector_id = m_mapData.getNextSectorId();
+    newSector.floor_z = floorZ;
+    newSector.ceiling_z = ceilingZ;
+    newSector.floor_texture_id = floorTexture;
+    newSector.ceiling_texture_id = ceilingTexture;
+    
+    // Create 4 walls (rectangle)
+    float hw = width / 2.0f;   // half width
+    float hh = height / 2.0f;  // half height
+    
+    // Wall 0: Bottom (left to right)
+    Wall wall0;
+    wall0.wall_id = 0;
+    wall0.x1 = centerX - hw;
+    wall0.y1 = centerY - hh;
+    wall0.x2 = centerX + hw;
+    wall0.y2 = centerY - hh;
+    wall0.texture_id_lower = wallTexture;
+    wall0.texture_id_middle = wallTexture;
+    wall0.texture_id_upper = wallTexture;
+    wall0.portal_id = -1;
+    newSector.walls.append(wall0);
+    
+    // Wall 1: Right (bottom to top)
+    Wall wall1;
+    wall1.wall_id = 1;
+    wall1.x1 = centerX + hw;
+    wall1.y1 = centerY - hh;
+    wall1.x2 = centerX + hw;
+    wall1.y2 = centerY + hh;
+    wall1.texture_id_lower = wallTexture;
+    wall1.texture_id_middle = wallTexture;
+    wall1.texture_id_upper = wallTexture;
+    wall1.portal_id = -1;
+    newSector.walls.append(wall1);
+    
+    // Wall 2: Top (right to left)
+    Wall wall2;
+    wall2.wall_id = 2;
+    wall2.x1 = centerX + hw;
+    wall2.y1 = centerY + hh;
+    wall2.x2 = centerX - hw;
+    wall2.y2 = centerY + hh;
+    wall2.texture_id_lower = wallTexture;
+    wall2.texture_id_middle = wallTexture;
+    wall2.texture_id_upper = wallTexture;
+    wall2.portal_id = -1;
+    newSector.walls.append(wall2);
+    
+    // Wall 3: Left (top to bottom)
+    Wall wall3;
+    wall3.wall_id = 3;
+    wall3.x1 = centerX - hw;
+    wall3.y1 = centerY + hh;
+    wall3.x2 = centerX - hw;
+    wall3.y2 = centerY - hh;
+    wall3.texture_id_lower = wallTexture;
+    wall3.texture_id_middle = wallTexture;
+    wall3.texture_id_upper = wallTexture;
+    wall3.portal_id = -1;
+    newSector.walls.append(wall3);
+    
+    // Create vertices for the sector (needed for moving/editing)
+    newSector.vertices.append(QPointF(centerX - hw, centerY - hh));  // Bottom-left
+    newSector.vertices.append(QPointF(centerX + hw, centerY - hh));  // Bottom-right
+    newSector.vertices.append(QPointF(centerX + hw, centerY + hh));  // Top-right
+    newSector.vertices.append(QPointF(centerX - hw, centerY + hh));  // Top-left
+    
+    // Add sector to map
+    m_mapData.sectors.append(newSector);
+    int newSectorIndex = m_mapData.sectors.size() - 1;
+    
+    // Auto-detect parent sector (sector containing the box center)
+    int parentSectorIndex = -1;
+    for (int i = 0; i < newSectorIndex; i++) {
+        const Sector &sector = m_mapData.sectors[i];
+        
+        // Point-in-polygon test
+        bool inside = false;
+        int j = sector.vertices.size() - 1;
+        for (int k = 0; k < sector.vertices.size(); j = k++) {
+            const QPointF &vj = sector.vertices[j];
+            const QPointF &vk = sector.vertices[k];
+            
+            if (((vk.y() > centerY) != (vj.y() > centerY)) &&
+                (centerX < (vj.x() - vk.x()) * (centerY - vk.y()) / (vj.y() - vk.y()) + vk.x())) {
+                inside = !inside;
+            }
+        }
+        
+        if (inside) {
+            parentSectorIndex = i;
+            break;
+        }
+    }
+    
+    // Assign parent-child relationship
+    if (parentSectorIndex >= 0) {
+        m_mapData.sectors[newSectorIndex].parent_sector_id = m_mapData.sectors[parentSectorIndex].sector_id;
+        
+        // Add this sector as child of parent
+        m_mapData.sectors[parentSectorIndex].child_sector_ids.append(newSector.sector_id);
+        
+        m_statusLabel->setText(tr("Caja creada (Sector %1) como hijo del Sector %2")
+                              .arg(newSector.sector_id)
+                              .arg(m_mapData.sectors[parentSectorIndex].sector_id));
+    } else {
+        m_mapData.sectors[newSectorIndex].parent_sector_id = -1;  // Root sector
+        m_statusLabel->setText(tr("Caja creada (Sector %1) como sector raíz")
+                              .arg(newSector.sector_id));
+    }
+    
+    // NOTE: We do NOT create portals here
+    // The motor will automatically detect this as a nested sector using AABB checks
+    // in ray_detect_nested_sectors() and create portals if needed
+    
+    // Update UI
+    updateSectorList();
+    m_gridEditor->update();
+    updateVisualMode();
+    
+    m_statusLabel->setText(tr("Caja creada (Sector %1) en (%2, %3)")
+                          .arg(newSector.sector_id)
+                          .arg(centerX)
+                          .arg(centerY));
+    
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle(tr("Caja Creada"));
+    msgBox.setIcon(QMessageBox::Information);
+    msgBox.setText(tr("Caja creada correctamente (Sector %1).").arg(newSector.sector_id));
+    msgBox.setInformativeText(tr(
+        "Para que la caja se renderice en el motor, necesitas crear un portal:\n\n"
+        "1. Activa el modo 'Portal Manual' en la barra de herramientas\n"
+        "2. Haz clic en una pared de la habitación\n"
+        "3. Haz clic en una pared de la caja\n"
+        "4. El portal se creará automáticamente\n\n"
+        "¿Quieres activar el modo Portal Manual ahora?"));
+    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    msgBox.setDefaultButton(QMessageBox::Yes);
+    
+    if (msgBox.exec() == QMessageBox::Yes) {
+        // Enable manual portal mode
+        m_manualPortalsButton->setChecked(true);
+        onToggleManualPortals(true);
+    }
+}
+
+void MainWindow::onInsertColumn()
+{
+    QMessageBox::information(this, tr("Insertar Columna"),
+        tr("Función 'Insertar Columna' en desarrollo.\n\n"
+           "Similar a 'Insertar Caja' pero con tamaño más pequeño\n"
+           "para pilares y soportes."));
+}
+
+void MainWindow::onInsertPlatform()
+{
+    QMessageBox::information(this, tr("Insertar Plataforma"),
+        tr("Función 'Insertar Plataforma' en desarrollo.\n\n"
+           "Esta herramienta creará:\n"
+           "• Un sector con suelo elevado\n"
+           "• Portales al sector padre\n"
+           "• Altura configurable"));
+}
+
+void MainWindow::onInsertDoor()
+{
+    // Future implementation
+}
+
+void MainWindow::onInsertElevator()
+{
+    // Future implementation
+}
+
+void MainWindow::onInsertStairs()
+{
+    QMessageBox::information(this, tr("Insertar Escaleras"), 
+                           tr("Esta función estará disponible próximamente."));
+}
+
+void MainWindow::onSetParentSector()
+{
+    if (m_sectorListWidget->selectedItems().isEmpty()) {
+        QMessageBox::warning(this, tr("Asignar Sector Padre"),
+                           tr("Por favor, selecciona un sector primero."));
+        return;
+    }
+    
+    // Use selectedItems()[0] instead of currentItem() because currentItem() can be NULL
+    QListWidgetItem *selectedItem = m_sectorListWidget->selectedItems()[0];
+    int selectedSectorId = selectedItem->data(Qt::UserRole).toInt();
+    
+    int selectedIndex = -1;
+    for (int i = 0; i < m_mapData.sectors.size(); i++) {
+        if (m_mapData.sectors[i].sector_id == selectedSectorId) {
+            selectedIndex = i;
+            break;
+        }
+    }
+    
+    if (selectedIndex < 0) {
+        return;
+    }
+    
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Asignar Sector Padre"));
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    
+    layout->addWidget(new QLabel(tr("Selecciona el sector padre para el Sector %1:").arg(selectedSectorId)));
+    
+    QListWidget *parentList = new QListWidget();
+    QListWidgetItem *noneItem = new QListWidgetItem(tr("(Ninguno - Sector Raíz)"));
+    noneItem->setData(Qt::UserRole, -1);
+    parentList->addItem(noneItem);
+    
+    for (int i = 0; i < m_mapData.sectors.size(); i++) {
+        if (i == selectedIndex) continue;
+        const Sector &sector = m_mapData.sectors[i];
+        QListWidgetItem *item = new QListWidgetItem(tr("Sector %1").arg(sector.sector_id));
+        item->setData(Qt::UserRole, sector.sector_id);
+        parentList->addItem(item);
+    }
+    layout->addWidget(parentList);
+    
+    QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttonBox);
+    
+    if (dialog.exec() == QDialog::Accepted && parentList->currentItem()) {
+        int newParentId = parentList->currentItem()->data(Qt::UserRole).toInt();
+        int oldParentId = m_mapData.sectors[selectedIndex].parent_sector_id;
+        
+        // Remove from old parent's children list
+        if (oldParentId >= 0) {
+            bool foundOldParent = false;
+            for (int i = 0; i < m_mapData.sectors.size(); i++) {
+                if (m_mapData.sectors[i].sector_id == oldParentId) {
+                    m_mapData.sectors[i].child_sector_ids.removeAll(selectedSectorId);
+                    foundOldParent = true;
+                    break;
+                }
+            }
+            if (!foundOldParent) {
+                qWarning() << "Warning: Old parent sector" << oldParentId << "not found!";
+            }
+        }
+        
+        m_mapData.sectors[selectedIndex].parent_sector_id = newParentId;
+        
+        // Add to new parent's children list
+        if (newParentId >= 0) {
+            bool foundNewParent = false;
+            for (int i = 0; i < m_mapData.sectors.size(); i++) {
+                if (m_mapData.sectors[i].sector_id == newParentId) {
+                    if (!m_mapData.sectors[i].child_sector_ids.contains(selectedSectorId)) {
+                        m_mapData.sectors[i].child_sector_ids.append(selectedSectorId);
+                    }
+                    foundNewParent = true;
+                    break;
+                }
+            }
+            if (!foundNewParent) {
+                QMessageBox::critical(this, tr("Error"),
+                                    tr("No se pudo encontrar el sector padre %1!").arg(newParentId));
+                // Revert the change
+                m_mapData.sectors[selectedIndex].parent_sector_id = oldParentId;
+                return;
+            }
+        }
+        
+        updateSectorList();
+        m_statusLabel->setText(tr("Sector %1: Padre = %2")
+                              .arg(selectedSectorId)
+                              .arg(newParentId >= 0 ? QString::number(newParentId) : tr("Ninguno")));
+    }
+}
+
+
+/* ============================================================================
    PORTAL TEXTURE SLOTS (User Request)
    ============================================================================ */
 
@@ -1989,4 +2489,271 @@ void MainWindow::updateVisualMode()
     if (m_visualModeWidget && m_visualModeWidget->isVisible()) {
         m_visualModeWidget->setMapData(m_mapData, false); // false = Don't reset camera
     }
+}
+
+/* ============================================================================
+   DECAL EDITING
+   ============================================================================ */
+
+void MainWindow::onDecalPlaced(float x, float y)
+{
+    int mode = m_modeCombo->currentIndex();
+    bool isFloor = (mode == 7); // "Colocar Decal Suelo"
+    
+    // Find which sector contains this point
+    int targetSectorId = -1;
+    for (int i = 0; i < m_mapData.sectors.size(); i++) {
+        const Sector &sector = m_mapData.sectors[i];
+        
+        // Check if point is inside sector using ray casting algorithm
+        bool inside = false;
+        int j = sector.vertices.size() - 1;
+        for (int k = 0; k < sector.vertices.size(); k++) {
+            if (((sector.vertices[k].y() > y) != (sector.vertices[j].y() > y)) &&
+                (x < (sector.vertices[j].x() - sector.vertices[k].x()) * 
+                     (y - sector.vertices[k].y()) / 
+                     (sector.vertices[j].y() - sector.vertices[k].y()) + 
+                     sector.vertices[k].x())) {
+                inside = !inside;
+            }
+            j = k;
+        }
+        
+        if (inside) {
+            targetSectorId = sector.sector_id;
+            break;
+        }
+    }
+    
+    // Check if we found a sector
+    if (targetSectorId < 0) {
+        m_statusLabel->setText(tr("Error: Click dentro de un sector para colocar el decal"));
+        return;
+    }
+    
+    // Create new decal
+    Decal decal;
+    decal.id = m_mapData.getNextDecalId();
+    decal.sector_id = targetSectorId;
+    decal.is_floor = isFloor;
+    decal.x = x;
+    decal.y = y;
+    decal.width = m_decalWidthSpin->value();
+    decal.height = m_decalHeightSpin->value();
+    decal.rotation = m_decalRotationSpin->value() * M_PI / 180.0f; // Degrees to radians
+    decal.texture_id = m_decalTextureSpin->value();
+    decal.alpha = m_decalAlphaSpin->value();
+    decal.render_order = m_decalRenderOrderSpin->value();
+    
+    m_mapData.decals.append(decal);
+    m_gridEditor->update();
+    
+    // Auto-select the newly created decal and show properties panel
+    m_selectedDecalId = decal.id;
+    updateDecalPanel();
+    m_decalDock->show();
+    
+    m_statusLabel->setText(tr("Decal %1 colocado en sector %2 en (%3, %4)")
+                          .arg(decal.id).arg(targetSectorId).arg(x).arg(y));
+}
+
+void MainWindow::onDecalSelected(int decalId)
+{
+    m_selectedDecalId = decalId;
+    updateDecalPanel();
+    m_decalDock->show();
+}
+
+void MainWindow::onDecalXChanged(double value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->x = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDecalYChanged(double value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->y = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDecalWidthChanged(double value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->width = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDecalHeightChanged(double value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->height = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDecalRotationChanged(double value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->rotation = value * M_PI / 180.0f; // Degrees to radians
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDecalTextureChanged(int value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->texture_id = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onSelectDecalTexture()
+{
+    TextureSelector selector(m_textureCache, this);
+    if (selector.exec() == QDialog::Accepted) {
+        int textureId = selector.selectedTextureId();
+        m_decalTextureSpin->setValue(textureId);
+    }
+}
+
+void MainWindow::onDecalAlphaChanged(double value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->alpha = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDecalRenderOrderChanged(int value)
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (decal) {
+        decal->render_order = value;
+        m_gridEditor->update();
+    }
+}
+
+void MainWindow::onDeleteDecal()
+{
+    for (int i = 0; i < m_mapData.decals.size(); i++) {
+        if (m_mapData.decals[i].id == m_selectedDecalId) {
+            m_mapData.decals.removeAt(i);
+            m_selectedDecalId = -1;
+            m_decalDock->hide();
+            m_gridEditor->update();
+            m_statusLabel->setText(tr("Decal eliminado"));
+            break;
+        }
+    }
+}
+
+void MainWindow::updateDecalPanel()
+{
+    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    if (!decal) {
+        m_decalIdLabel->setText(tr("Ninguno"));
+        return;
+    }
+    
+    // Block signals to avoid triggering updates
+    m_decalXSpin->blockSignals(true);
+    m_decalYSpin->blockSignals(true);
+    m_decalWidthSpin->blockSignals(true);
+    m_decalHeightSpin->blockSignals(true);
+    m_decalRotationSpin->blockSignals(true);
+    m_decalTextureSpin->blockSignals(true);
+    m_decalAlphaSpin->blockSignals(true);
+    m_decalRenderOrderSpin->blockSignals(true);
+    
+    m_decalIdLabel->setText(QString::number(decal->id));
+    m_decalXSpin->setValue(decal->x);
+    m_decalYSpin->setValue(decal->y);
+    m_decalWidthSpin->setValue(decal->width);
+    m_decalHeightSpin->setValue(decal->height);
+    m_decalRotationSpin->setValue(decal->rotation * 180.0f / M_PI); // Radians to degrees
+    m_decalTextureSpin->setValue(decal->texture_id);
+    m_decalAlphaSpin->setValue(decal->alpha);
+    m_decalRenderOrderSpin->setValue(decal->render_order);
+    
+    // Unblock signals
+    m_decalXSpin->blockSignals(false);
+    m_decalYSpin->blockSignals(false);
+    m_decalWidthSpin->blockSignals(false);
+    m_decalHeightSpin->blockSignals(false);
+    m_decalRotationSpin->blockSignals(false);
+    m_decalTextureSpin->blockSignals(false);
+    m_decalAlphaSpin->blockSignals(false);
+    m_decalRenderOrderSpin->blockSignals(false);
+}
+
+// FPG Editor slots
+void MainWindow::onOpenFPGEditor()
+{
+    if (!m_fpgEditor) {
+        m_fpgEditor = new FPGEditor(this);
+        connect(m_fpgEditor, &FPGEditor::fpgReloaded, this, &MainWindow::onFPGReloaded);
+    }
+    
+    // If we have a current FPG, load it
+    if (!m_currentFPGPath.isEmpty()) {
+        m_fpgEditor->setFPGPath(m_currentFPGPath);
+        m_fpgEditor->loadFPG();
+    }
+    
+    m_fpgEditor->show();
+    m_fpgEditor->raise();
+    m_fpgEditor->activateWindow();
+}
+
+void MainWindow::onFPGReloaded()
+{
+    // Reload FPG in main editor
+    if (m_currentFPGPath.isEmpty()) return;
+    
+    QVector<TextureEntry> textures;
+    bool success = FPGLoader::loadFPG(m_currentFPGPath, textures);
+    
+    if (success) {
+        QMap<int, QPixmap> textureMap = FPGLoader::getTextureMap(textures);
+        
+        m_mapData.textures.clear();
+        for (const TextureEntry &entry : textures) {
+            m_mapData.textures.append(entry);
+        }
+        
+        m_gridEditor->setTextures(textureMap);
+        
+        m_textureCache.clear();
+        for (const TextureEntry &entry : textures) {
+            m_textureCache[entry.id] = entry.pixmap;
+        }
+        
+        m_statusLabel->setText(tr("FPG reloaded: %1 textures").arg(textures.size()));
+    }
+}
+
+void MainWindow::onOpenEffectGenerator()
+{
+    EffectGeneratorDialog *dialog = new EffectGeneratorDialog(this);
+    dialog->exec();
+    delete dialog;
+}
+
+void MainWindow::onOpenCameraPathEditor()
+{
+    CameraPathEditor *editor = new CameraPathEditor(m_mapData, this);
+    editor->exec();
+    delete editor;
 }

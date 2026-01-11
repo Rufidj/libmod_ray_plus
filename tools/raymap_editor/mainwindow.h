@@ -16,6 +16,8 @@
 #include "grideditor.h"
 #include "textureselector.h"
 #include "visualmodewidget.h"
+#include "fpgeditor.h"
+#include "effectgeneratordialog.h"
 
 class MainWindow : public QMainWindow
 {
@@ -34,6 +36,14 @@ private slots:
     void onImportWLD();  // Import WLD file
     void onLoadFPG();
     void onExit();
+    void openRecentMap();
+    void openRecentFPG();
+    
+    // Tools menu
+    void onOpenFPGEditor();
+    void onFPGReloaded();
+    void onOpenEffectGenerator();
+    void onOpenCameraPathEditor();
     
     // View menu
     void onZoomIn();
@@ -55,10 +65,7 @@ private slots:
     void onSelectSectorFloorTexture();
     void onSelectSectorCeilingTexture();
     
-    // Nested sector editing (NEW)
-    void onSectorParentChanged(int index);
-    void onSectorTypeChanged(int index);
-    void onSectorSolidChanged(bool checked);
+
     
     // Wall editing
     void onWallTextureLowerChanged(int value);
@@ -81,6 +88,16 @@ private slots:
     void onCreateRectangle();
     void onCreateCircle();
     
+    // Insert Tools
+    void onInsertBox();
+    void onInsertColumn();
+    void onInsertPlatform();
+    void onInsertDoor();        // Future
+    void onInsertElevator();    // Future
+    void onInsertStairs();      // Future
+    
+    void onSetParentSector();  // Assign parent sector to selected sector    // Future
+    
     // Sector list (NEW)
     void onSectorListItemClicked(QListWidgetItem *item);
     void updateSectorList();  // Refresh the sector list
@@ -94,6 +111,26 @@ private slots:
     
     // Visual Mode Update
     void updateVisualMode();
+    
+    // Recent files helpers
+    void updateRecentMapsMenu();
+    void updateRecentFPGsMenu();
+    void addToRecentMaps(const QString &filename);
+    void addToRecentFPGs(const QString &filename);
+    
+    // Decal editing
+    void onDecalPlaced(float x, float y);
+    void onDecalSelected(int decalId);
+    void onDecalXChanged(double value);
+    void onDecalYChanged(double value);
+    void onDecalWidthChanged(double value);
+    void onDecalHeightChanged(double value);
+    void onDecalRotationChanged(double value);
+    void onDecalTextureChanged(int value);
+    void onSelectDecalTexture();
+    void onDecalAlphaChanged(double value);
+    void onDecalRenderOrderChanged(int value);
+    void onDeleteDecal();
     
 private:
     // UI Components
@@ -117,11 +154,7 @@ private:
     QSpinBox *m_sectorFloorTextureSpin;
     QSpinBox *m_sectorCeilingTextureSpin;
     
-    // Nested sector controls (NEW)
-    QComboBox *m_sectorParentCombo;
-    QComboBox *m_sectorTypeCombo;
-    QCheckBox *m_sectorSolidCheckbox;
-    QLabel *m_sectorNestingLevelLabel;
+
     
     // Wall controls
     QLabel *m_wallIdLabel;
@@ -130,6 +163,19 @@ private:
     QSpinBox *m_wallTextureUpperSpin;
     QDoubleSpinBox *m_wallSplitLowerSpin;
     QDoubleSpinBox *m_wallSplitUpperSpin;
+    
+    // Decal controls
+    QDockWidget *m_decalDock;
+    QLabel *m_decalIdLabel;
+    QDoubleSpinBox *m_decalXSpin;
+    QDoubleSpinBox *m_decalYSpin;
+    QDoubleSpinBox *m_decalWidthSpin;
+    QDoubleSpinBox *m_decalHeightSpin;
+    QDoubleSpinBox *m_decalRotationSpin;
+    QSpinBox *m_decalTextureSpin;
+    QDoubleSpinBox *m_decalAlphaSpin;
+    QSpinBox *m_decalRenderOrderSpin;
+    QPushButton *m_deleteDecalButton;
     
     // Toolbar
     QComboBox *m_modeCombo;
@@ -140,12 +186,17 @@ private:
     // Status bar
     QLabel *m_statusLabel;
     
+    // Tools
+    FPGEditor *m_fpgEditor;
+    
     // Data
     MapData m_mapData;
     QString m_currentMapFile;
+    QString m_currentFPGPath;
     int m_currentFPG;
     int m_selectedSectorId;
     int m_selectedWallId;
+    int m_selectedDecalId;
     
     // Slots for Skybox
     void onSkyboxTextureChanged(int value);
@@ -185,15 +236,28 @@ private:
     QAction *m_loadFPGAction;
     QAction *m_exitAction;
     
+    // Recent files menus
+    QMenu *m_recentMapsMenu;
+    QMenu *m_recentFPGsMenu;
+    
     QAction *m_zoomInAction;
     QAction *m_zoomOutAction;
     QAction *m_zoomResetAction;
     QAction *m_visualModeAction;
     
+    // Insert Tools
+    QAction *m_insertBoxAction;
+    QAction *m_insertColumnAction;
+    QAction *m_insertPlatformAction;
+    QAction *m_insertDoorAction;        // Future
+    QAction *m_insertElevatorAction;    // Future
+    QAction *m_insertStairsAction;      // Future
+    
     // Helpers
     void updateWindowTitle();
     void updateSectorPanel();
     void updateWallPanel();
+    void updateDecalPanel();
 };
 
 #endif // MAINWINDOW_H

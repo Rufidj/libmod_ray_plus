@@ -419,7 +419,10 @@ void WLDImporter::convertRegionsToSectors(const QVector<WLD_Point> &points,
         sector.ceiling_texture_id = wldRegion.ceil_tex;
         sector.light_level = 255;
         
-        // Initialize nested sector fields (WLD doesn't have nesting) - REMOVED for v9 format
+        // Initialize nested sector fields (WLD doesn't have nesting)
+        sector.parent_sector_id = -1;  // Root sector
+        sector.sector_type = Sector::ROOT;
+        sector.is_solid = false;
         
         // Create walls for this sector
         // Create walls for this sector from WLD walls
@@ -473,58 +476,58 @@ void WLDImporter::convertRegionsToSectors(const QVector<WLD_Point> &points,
         mapData.sectors.append(sector);
     }
     
-    // BUILD_ENGINE:     // Calculate nested sectors based on portal relationships and wall counts
-    // BUILD_ENGINE:     // The region with MORE walls is the parent, the one with FEWER walls is the nested child
-    // BUILD_ENGINE:     QMap<QPair<int, int>, bool> processedPairs;
-    // BUILD_ENGINE:     
-    // BUILD_ENGINE:     for (const Portal &portal : mapData.portals) {
-    // BUILD_ENGINE:         int sectorA = portal.sector_a;
-    // BUILD_ENGINE:         int sectorB = portal.sector_b;
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         // Avoid processing the same pair twice
-    // BUILD_ENGINE:         QPair<int, int> pair1(sectorA, sectorB);
-    // BUILD_ENGINE:         QPair<int, int> pair2(sectorB, sectorA);
-    // BUILD_ENGINE:         if (processedPairs.contains(pair1) || processedPairs.contains(pair2)) {
-    // BUILD_ENGINE:             continue;
-    // BUILD_ENGINE:         }
-    // BUILD_ENGINE:         processedPairs[pair1] = true;
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         // Find both sectors
-    // BUILD_ENGINE:         Sector *secA = nullptr;
-    // BUILD_ENGINE:         Sector *secB = nullptr;
-    // BUILD_ENGINE:         for (Sector &s : mapData.sectors) {
-    // BUILD_ENGINE:             if (s.sector_id == sectorA) secA = &s;
-    // BUILD_ENGINE:             if (s.sector_id == sectorB) secB = &s;
-    // BUILD_ENGINE:         }
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         if (!secA || !secB) continue;
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         // Determine parent/child based on wall count
-    // BUILD_ENGINE:         int wallsA = secA->walls.size();
-    // BUILD_ENGINE:         int wallsB = secB->walls.size();
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         Sector *parent = nullptr;
-    // BUILD_ENGINE:         Sector *child = nullptr;
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         if (wallsA > wallsB) {
-    // BUILD_ENGINE:             parent = secA;
-    // BUILD_ENGINE:             child = secB;
-    // BUILD_ENGINE:         } else if (wallsB > wallsA) {
-    // BUILD_ENGINE:             parent = secB;
-    // BUILD_ENGINE:             child = secA;
-    // BUILD_ENGINE:         } else {
-    // BUILD_ENGINE:             // Same number of walls, use sectorB as parent (matches WLD logic)
-    // BUILD_ENGINE:             parent = secB;
-    // BUILD_ENGINE:             child = secA;
-    // BUILD_ENGINE:         }
-    // BUILD_ENGINE:         
-    // BUILD_ENGINE:         // Set nested relationship
-    // BUILD_ENGINE:         child->parent_sector_id = parent->sector_id;
-    // BUILD_ENGINE:         child->sector_type = Sector::NESTED_ROOM;
-    // BUILD_ENGINE:         // Parent remains as ROOT (already set during initialization)
-    // BUILD_ENGINE:     }
-    // BUILD_ENGINE:     
-    // BUILD_ENGINE:     qDebug() << "WLDImporter: Calculated nested sector relationships";
+    // Calculate nested sectors based on portal relationships and wall counts
+    // The region with MORE walls is the parent, the one with FEWER walls is the nested child
+    QMap<QPair<int, int>, bool> processedPairs;
+    
+    for (const Portal &portal : mapData.portals) {
+        int sectorA = portal.sector_a;
+        int sectorB = portal.sector_b;
+        
+        // Avoid processing the same pair twice
+        QPair<int, int> pair1(sectorA, sectorB);
+        QPair<int, int> pair2(sectorB, sectorA);
+        if (processedPairs.contains(pair1) || processedPairs.contains(pair2)) {
+            continue;
+        }
+        processedPairs[pair1] = true;
+        
+        // Find both sectors
+        Sector *secA = nullptr;
+        Sector *secB = nullptr;
+        for (Sector &s : mapData.sectors) {
+            if (s.sector_id == sectorA) secA = &s;
+            if (s.sector_id == sectorB) secB = &s;
+        }
+        
+        if (!secA || !secB) continue;
+        
+        // Determine parent/child based on wall count
+        int wallsA = secA->walls.size();
+        int wallsB = secB->walls.size();
+        
+        Sector *parent = nullptr;
+        Sector *child = nullptr;
+        
+        if (wallsA > wallsB) {
+            parent = secA;
+            child = secB;
+        } else if (wallsB > wallsA) {
+            parent = secB;
+            child = secA;
+        } else {
+            // Same number of walls, use sectorB as parent (matches WLD logic)
+            parent = secB;
+            child = secA;
+        }
+        
+        // Set nested relationship
+        child->parent_sector_id = parent->sector_id;
+        child->sector_type = Sector::NESTED_ROOM;
+        // Parent remains as ROOT (already set during initialization)
+    }
+    
+    qDebug() << "WLDImporter: Calculated nested sector relationships";
     
     // Second pass: Calculate wall height splits for portals
     for (Sector &sector : mapData.sectors) {
@@ -665,20 +668,46 @@ QVector<QPointF> WLDImporter::buildSectorPolygon(const QVector<const WLD_Wall*> 
 void WLDImporter::detectPortals(const QVector<WLD_Point> &points,
                                 const QVector<WLD_Wall> &walls,
                                 MapData &mapData) {
-    qDebug() << "WLDImporter: Detecting portals (Build Engine style - using nextsector)";
+    qDebug() << "WLDImporter: Detecting portals and assigning to sector walls";
     
-    // BUILD_ENGINE: Instead of creating Portal structures, we directly assign
-    // wall.portal_id = connected_sector_id (acts as nextsector)
+    // First pass: Create portal structures and map WLD walls to portal IDs
+    QMap<int, int> wldWallIndexToPortalId;  // WLD wall index -> portal ID
+    int portal_id = 0;
     
+    for (int w = 0; w < walls.size(); w++) {
+        const WLD_Wall &wall = walls[w];
+        
+        if (!wall.active) continue;
+        
+        // Check if this is a portal wall
+        if (wall.front_region >= 0 && wall.back_region >= 0 &&
+            wall.front_region != wall.back_region) {
+            
+            // Create portal
+            Portal portal;
+            portal.portal_id = portal_id;
+            portal.sector_a = wall.front_region;
+            portal.sector_b = wall.back_region;
+            
+            mapData.portals.append(portal);
+            wldWallIndexToPortalId[w] = portal_id;
+            
+            portal_id++;
+        }
+    }
+    
+    qDebug() << "WLDImporter: Created" << mapData.portals.size() << "portal structures";
+    
+    // Second pass: Assign portal IDs to sector walls by matching coordinates
     int portals_assigned = 0;
     
     for (Sector &sector : mapData.sectors) {
         for (Wall &sectorWall : sector.walls) {
             // Try to find matching WLD wall by coordinates
             for (int w = 0; w < walls.size(); w++) {
-                const WLD_Wall &wldWall = walls[w];
+                if (!wldWallIndexToPortalId.contains(w)) continue;
                 
-                if (!wldWall.active) continue;
+                const WLD_Wall &wldWall = walls[w];
                 
                 // Check if this WLD wall belongs to current sector
                 if (wldWall.front_region != sector.sector_id &&
@@ -702,31 +731,22 @@ void WLDImporter::detectPortals(const QVector<WLD_Point> &points,
                                pointsEqual(wldP1.x, wldP1.y, (int32_t)sectorWall.x2, (int32_t)sectorWall.y2));
                 
                 if (matches) {
-                    // BUILD_ENGINE: Check if this is a portal wall
-                    if (wldWall.front_region >= 0 && wldWall.back_region >= 0 &&
-                        wldWall.front_region != wldWall.back_region) {
-                        
-                        // Determine which sector is on the other side
-                        int connected_sector = (wldWall.front_region == sector.sector_id) 
-                                             ? wldWall.back_region 
-                                             : wldWall.front_region;
-                        
-                        // BUILD_ENGINE: Assign nextsector directly
-                        // portal_id now acts as nextsector (connected sector ID)
-                        sectorWall.portal_id = connected_sector;
-                        
-                        portals_assigned++;
+                    sectorWall.portal_id = wldWallIndexToPortalId[w];
+                    
+                    if (!sector.portal_ids.contains(wldWallIndexToPortalId[w])) {
+                        sector.portal_ids.append(wldWallIndexToPortalId[w]);
                     }
                     
+                    portals_assigned++;
                     break;  // Found match, move to next sector wall
                 }
             }
         }
     }
     
-    qDebug() << "WLDImporter: Assigned" << portals_assigned << "portal connections (nextsector style)";
+    qDebug() << "WLDImporter: Assigned" << portals_assigned << "portal IDs to sector walls";
     
-    // Fix textures for portal walls (match original WLD behavior)
+    // Third pass: Fix textures for portal walls (match original WLD behavior)
     for (Sector &sector : mapData.sectors) {
         for (Wall &wall : sector.walls) {
             if (wall.portal_id >= 0) {

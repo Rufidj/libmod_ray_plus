@@ -32,6 +32,21 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         ${PROJECT_SOURCES}
         fpgloader.h
         fpgloader.cpp
+        fpgeditor.h
+        fpgeditor.cpp
+        effectgenerator.h
+        effectgenerator.cpp
+        effectgeneratordialog.h
+        effectgeneratordialog.cpp
+        camerakeyframe.h
+        camerapath.h
+        camerapath.cpp
+        camerapathio.h
+        camerapathio.cpp
+        camerapatheditor.h
+        camerapatheditor.cpp
+        camerapathcanvas.h
+        camerapathcanvas.cpp
         grideditor.h
         grideditor.cpp
         textureselector.h
@@ -51,12 +66,29 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         wldimporter.cpp
         raycastrenderer.h
         raycastrenderer.cpp
+        insertboxdialog.h
+        insertboxdialog.cpp
     )
 else()
     add_executable(raymap_editor
         ${PROJECT_SOURCES}
         fpgloader.h
         fpgloader.cpp
+        fpgeditor.h
+        fpgeditor.cpp
+        effectgenerator.h
+        effectgenerator.cpp
+        effectgeneratordialog.h
+        effectgeneratordialog.cpp
+        camerakeyframe.h
+        camerapath.h
+        camerapath.cpp
+        camerapathio.h
+        camerapathio.cpp
+        camerapatheditor.h
+        camerapatheditor.cpp
+        camerapathcanvas.h
+        camerapathcanvas.cpp
         grideditor.h
         grideditor.cpp
         textureselector.h
@@ -76,6 +108,8 @@ else()
         wldimporter.cpp
         raycastrenderer.h
         raycastrenderer.cpp
+        insertboxdialog.h
+        insertboxdialog.cpp
     )
 endif()
 

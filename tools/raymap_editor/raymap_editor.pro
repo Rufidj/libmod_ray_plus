@@ -15,23 +15,27 @@ DESTDIR = $$PWD
 HEADERS += \
     mainwindow.h \
     fpgloader.h \
+    fpgeditor.h \
     grideditor.h \
     texturepalette.h \
     spriteeditor.h \
     cameramarker.h \
     raymapformat.h \
-    mapdata.h
+    mapdata.h \
+    insertboxdialog.h
 
 # Archivos fuente
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
     fpgloader.cpp \
+    fpgeditor.cpp \
     grideditor.cpp \
     texturepalette.cpp \
     spriteeditor.cpp \
     cameramarker.cpp \
-    raymapformat.cpp
+    raymapformat.cpp \
+    insertboxdialog.cpp
 
 # Archivos UI
 FORMS += \

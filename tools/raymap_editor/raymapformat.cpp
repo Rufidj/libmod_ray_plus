@@ -1,5 +1,6 @@
 /*
- * raymapformat.cpp - Map Loading/Saving for Editor (Format v9)
+ * raymapformat.cpp - Map Loading/Saving for Editor (Format v10)
+ * v10: Added decals support
  * v9: Added nested sectors support
  * v8: Geometric sectors only
  */
@@ -34,7 +35,7 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
     
     /* Read header */
     char magic[8];
-    uint32_t version, num_sectors, num_portals, num_sprites, num_spawn_flags;
+    uint32_t version, num_sectors, num_portals, num_sprites, num_spawn_flags, num_decals;
     float camera_x, camera_y, camera_z, camera_rot, camera_pitch;
     int32_t skyTextureID;
     
@@ -59,10 +60,17 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
     }
     
     /* Verify version */
-    if (version < 8 || version > 9) {
-        qWarning() << "Versión no soportada:" << version << "(solo v8-v9)";
+    if (version < 8 || version > 10) {
+        qWarning() << "Versión no soportada:" << version << "(solo v8-v10)";
         file.close();
         return false;
+    }
+    
+    /* Read num_decals if v10+ */
+    if (version >= 10) {
+        in.readRawData(reinterpret_cast<char*>(&num_decals), sizeof(uint32_t));
+    } else {
+        num_decals = 0;
     }
     
     qDebug() << "Cargando mapa v" << version << ":" << num_sectors << "sectores," << num_portals << "portales";
@@ -124,26 +132,14 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
             sector.walls.append(wall);
         }
         
-        /* Version 9+: Load nested sector data */
-        if (version >= 9) {
-            in.readRawData(reinterpret_cast<char*>(&sector.parent_sector_id), sizeof(int));
-            
-            int32_t sector_type_int;
-            in.readRawData(reinterpret_cast<char*>(&sector_type_int), sizeof(int32_t));
-            sector.sector_type = static_cast<Sector::SectorType>(sector_type_int);
-            
-            in.readRawData(reinterpret_cast<char*>(&sector.is_solid), sizeof(bool));
-            in.readRawData(reinterpret_cast<char*>(&sector.nesting_level), sizeof(int));
-            
-            /* Read child IDs */
-            uint32_t num_children;
-            in.readRawData(reinterpret_cast<char*>(&num_children), sizeof(uint32_t));
-            
-            for (uint32_t c = 0; c < num_children; c++) {
-                int child_id;
-                in.readRawData(reinterpret_cast<char*>(&child_id), sizeof(int));
-                sector.child_sector_ids.append(child_id);
-            }
+        // Load hierarchy fields (parent and children)
+        in.readRawData(reinterpret_cast<char*>(&sector.parent_sector_id), sizeof(int));
+        int numChildren;
+        in.readRawData(reinterpret_cast<char*>(&numChildren), sizeof(int));
+        for (int c = 0; c < numChildren; c++) {
+            int childId;
+            in.readRawData(reinterpret_cast<char*>(&childId), sizeof(int));
+            sector.child_sector_ids.append(childId);
         }
         
         mapData.sectors.append(sector);
@@ -211,12 +207,39 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
         mapData.spawnFlags.append(flag);
     }
     
+    if (progressCallback) progressCallback("Cargando decals...");
+    
+    /* Load decals (v10+) */
+    mapData.decals.clear();
+    for (uint32_t i = 0; i < num_decals; i++) {
+        Decal decal;
+        
+        in.readRawData(reinterpret_cast<char*>(&decal.id), sizeof(int));
+        in.readRawData(reinterpret_cast<char*>(&decal.sector_id), sizeof(int));
+        
+        uint8_t is_floor_byte;
+        in.readRawData(reinterpret_cast<char*>(&is_floor_byte), sizeof(uint8_t));
+        decal.is_floor = (is_floor_byte != 0);
+        
+        in.readRawData(reinterpret_cast<char*>(&decal.x), sizeof(float));
+        in.readRawData(reinterpret_cast<char*>(&decal.y), sizeof(float));
+        in.readRawData(reinterpret_cast<char*>(&decal.width), sizeof(float));
+        in.readRawData(reinterpret_cast<char*>(&decal.height), sizeof(float));
+        in.readRawData(reinterpret_cast<char*>(&decal.rotation), sizeof(float));
+        in.readRawData(reinterpret_cast<char*>(&decal.texture_id), sizeof(int));
+        in.readRawData(reinterpret_cast<char*>(&decal.alpha), sizeof(float));
+        in.readRawData(reinterpret_cast<char*>(&decal.render_order), sizeof(int));
+        
+        mapData.decals.append(decal);
+    }
+    
     file.close();
     
     qDebug() << "Mapa cargado:" << mapData.sectors.size() << "sectores,"
              << mapData.portals.size() << "portales,"
              << mapData.sprites.size() << "sprites,"
-             << mapData.spawnFlags.size() << "spawn flags";
+             << mapData.spawnFlags.size() << "spawn flags,"
+             << mapData.decals.size() << "decals";
     
     return true;
 }
@@ -252,11 +275,12 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
     }
     // --------------------------------------------
     
-    uint32_t version = 9;  // Updated to v9 for nested sectors
+    uint32_t version = 10;  // Updated to v10 for decals
     uint32_t num_sectors = mapData.sectors.size();
     uint32_t num_portals = mapData.portals.size();
     uint32_t num_sprites = mapData.sprites.size();
     uint32_t num_spawn_flags = mapData.spawnFlags.size();
+    uint32_t num_decals = mapData.decals.size();
     
     float camera_x = mapData.camera.x;
     float camera_y = mapData.camera.y;
@@ -280,6 +304,7 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
     out.writeRawData(reinterpret_cast<const char*>(&camera_rot), sizeof(float));
     out.writeRawData(reinterpret_cast<const char*>(&camera_pitch), sizeof(float));
     out.writeRawData(reinterpret_cast<const char*>(&skyTextureID), sizeof(int32_t));
+    out.writeRawData(reinterpret_cast<const char*>(&num_decals), sizeof(uint32_t));
     
     if (progressCallback) progressCallback("Guardando sectores...");
     
@@ -331,24 +356,12 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
             out.writeRawData(reinterpret_cast<const char*>(&wall.flags), sizeof(int));
         }
         
-        /* Version 9: Write nested sector data */
+        // Save hierarchy (parent and children)
         out.writeRawData(reinterpret_cast<const char*>(&sector.parent_sector_id), sizeof(int));
-        
-        int32_t sector_type_int = static_cast<int32_t>(sector.sector_type);
-        out.writeRawData(reinterpret_cast<const char*>(&sector_type_int), sizeof(int32_t));
-        
-        /* EXPLICIT: Write as 1 byte to match C loader expectation */
-        uint8_t is_solid_byte = sector.is_solid ? 1 : 0;
-        out.writeRawData(reinterpret_cast<const char*>(&is_solid_byte), sizeof(uint8_t));
-        
-        out.writeRawData(reinterpret_cast<const char*>(&sector.nesting_level), sizeof(int));
-        
-        /* Write child IDs */
-        uint32_t num_children = sector.child_sector_ids.size();
-        out.writeRawData(reinterpret_cast<const char*>(&num_children), sizeof(uint32_t));
-        
-        for (int child_id : sector.child_sector_ids) {
-            out.writeRawData(reinterpret_cast<const char*>(&child_id), sizeof(int));
+        int numChildren = sector.child_sector_ids.size();
+        out.writeRawData(reinterpret_cast<const char*>(&numChildren), sizeof(int));
+        for (int childId : sector.child_sector_ids) {
+            out.writeRawData(reinterpret_cast<const char*>(&childId), sizeof(int));
         }
     }
     
@@ -393,13 +406,34 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
         out.writeRawData(reinterpret_cast<const char*>(&flag.z), sizeof(float));
     }
     
+    if (progressCallback) progressCallback("Guardando decals...");
+    
+    /* Write decals */
+    for (const Decal &decal : mapData.decals) {
+        out.writeRawData(reinterpret_cast<const char*>(&decal.id), sizeof(int));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.sector_id), sizeof(int));
+        
+        uint8_t is_floor_byte = decal.is_floor ? 1 : 0;
+        out.writeRawData(reinterpret_cast<const char*>(&is_floor_byte), sizeof(uint8_t));
+        
+        out.writeRawData(reinterpret_cast<const char*>(&decal.x), sizeof(float));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.y), sizeof(float));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.width), sizeof(float));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.height), sizeof(float));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.rotation), sizeof(float));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.texture_id), sizeof(int));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.alpha), sizeof(float));
+        out.writeRawData(reinterpret_cast<const char*>(&decal.render_order), sizeof(int));
+    }
+    
     /* Flush */
     out.device()->waitForBytesWritten(-1);
     file.flush();
     file.close();
     
     qDebug() << "Mapa guardado:" << mapData.sectors.size() << "sectores,"
-             << mapData.portals.size() << "portales";
+             << mapData.portals.size() << "portales,"
+             << mapData.decals.size() << "decals";
     
     return true;
 }
