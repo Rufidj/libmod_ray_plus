@@ -110,15 +110,27 @@ typedef struct {
     /* Iluminación */
     int light_level;                    /* Nivel de iluminación (0-255) */
     
-    
     /* ========================================================================
-       SECTOR HIERARCHY - For nested sectors (boxes, columns, platforms)
+       SECTORES ANIDADOS (Nested Sectors) - Versión 9+
        ======================================================================== */
     
-    int parent_sector_id;               /* -1 = root sector, >=0 = parent ID */
-    int *child_sector_ids;              /* Array of child sector IDs */
-    int num_children;                   /* Number of children */
-    int children_capacity;              /* Capacity of child array */
+    /* Jerarquía */
+    int parent_sector_id;               /* -1 = raíz, >=0 = ID del padre */
+    int *child_sector_ids;              /* IDs de sectores hijos */
+    int num_children;                   /* Número de hijos */
+    int children_capacity;              /* Capacidad del array */
+    
+    /* Tipo de sector */
+    enum {
+        RAY_SECTOR_ROOT = 0,            /* Sector raíz (sin padre) */
+        RAY_SECTOR_NESTED_ROOM = 1,     /* Habitación dentro de otra (hueca) */
+        RAY_SECTOR_NESTED_COLUMN = 2,   /* Columna/pilar (sólido) */
+        RAY_SECTOR_NESTED_BOX = 3       /* Caja/objeto (sólido, altura limitada) */
+    } sector_type;
+    
+    /* Propiedades de anidamiento */
+    int is_solid;                       /* 1 = sólido (columna/caja), 0 = hueco (habitación) */
+    int nesting_level;                  /* Nivel de profundidad (0 = raíz, 1 = hijo directo, etc.) */
     
     /* Optimization: AABB (Axis Aligned Bounding Box) */
     float min_x, min_y;
@@ -134,10 +146,6 @@ typedef struct {
     int sector_a, sector_b;             /* IDs de sectores conectados */
     int wall_id_a, wall_id_b;           /* IDs de paredes en cada sector */
     float x1, y1, x2, y2;               /* Segmento del portal en world space */
-    
-    /* BUILD ENGINE: Portal height range (min ceiling, max floor of both sectors) */
-    float floor_z;                      /* Portal floor height */
-    float ceiling_z;                    /* Portal ceiling height */
     
     /* Clipping Information (calculado durante rendering) */
     int screen_x1, screen_x2;           /* Rango de columnas en pantalla */
@@ -181,28 +189,6 @@ typedef struct {
     float interpolation;                /* Factor de interpolación entre frames (0.0 - 1.0) */
     float model_scale;                  /* Factor de escala del modelo (1.0 = normal, 10.0 = 10x más grande) */
 } RAY_Sprite;
-
-/* ============================================================================
-   DECALS - Overlay textures for floors/ceilings
-   ============================================================================ */
-
-typedef struct {
-    int id;                             /* Unique decal ID */
-    int sector_id;                      /* Sector this decal belongs to */
-    int is_floor;                       /* 1 = floor, 0 = ceiling */
-    
-    /* Position and size (world coordinates) */
-    float x, y;                         /* Center position */
-    float width, height;                /* Dimensions */
-    float rotation;                     /* Rotation in radians */
-    
-    /* Texture */
-    int texture_id;                     /* Texture ID from FPG */
-    
-    /* Rendering */
-    float alpha;                        /* Transparency (0.0-1.0) */
-    int render_order;                   /* Render order (higher = on top) */
-} RAY_Decal;
 
 /* ============================================================================
    SPAWN FLAGS - Posiciones de spawn para sprites
@@ -304,11 +290,6 @@ typedef struct {
     RAY_SpawnFlag *spawn_flags;
     int num_spawn_flags;
     int spawn_flags_capacity;
-    
-    /* Decals */
-    RAY_Decal *decals;
-    int num_decals;
-    int decals_capacity;
     
     /* FPG de texturas */
     int fpg_id;
@@ -445,22 +426,6 @@ void ray_detect_portals(RAY_Engine *engine);
 int ray_portal_is_visible(RAY_Portal *portal, RAY_Camera *camera);
 
 /* ============================================================================
-   FUNCIONES INTERNAS - Map Loading/Saving
-   ============================================================================ */
-
-/* Map Loading/Saving (v9) */
-int ray_load_map(const char *filename);
-int ray_save_map_v9(const char *filename);
-
-/* Deprecated (kept for temporary compatibility if needed) */
-int ray_load_map_v8(const char *filename);
-int ray_save_map_v8(const char *filename);
-
-/* Decal baking */
-void ray_bake_decals(void);  /* Bake decals into floor/ceiling textures */
-
-
-/* ============================================================================
    FUNCIONES INTERNAS - Raycasting
    ============================================================================ */
 
@@ -498,9 +463,5 @@ void ray_clip_window_clip_to_portal(RAY_ClipWindow *window, RAY_Portal *portal);
 float ray_screen_distance(float screenWidth, float fovRadians);
 float ray_strip_angle(float screenX, float screenDistance);
 float ray_strip_screen_height(float screenDistance, float correctDistance, float height);
-
-/* Decal Rendering */
-void render_decal(GRAPH *dest, RAY_Decal *decal, RAY_Sector *sector);
-void render_sector_decals(GRAPH *dest, int sector_id);
 
 #endif /* __LIBMOD_RAY_H */

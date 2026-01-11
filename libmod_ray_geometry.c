@@ -4,6 +4,7 @@
  */
 
 #include "libmod_ray.h"
+#include "libmod_ray_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -119,14 +120,15 @@ RAY_Sector* ray_sector_create(int sector_id, float floor_z, float ceiling_z,
     sector->portals_capacity = RAY_MAX_WALLS_PER_SECTOR;
     sector->portal_ids = (int*)malloc(sector->portals_capacity * sizeof(int));
     
-    /* Initialize nested sector fields */
-    sector->parent_sector_id = -1;  /* Root by default */
+    /* BUILD_ENGINE: Hierarchy fields removed - no longer needed
+    sector->parent_sector_id = -1;
     sector->children_capacity = RAY_MAX_WALLS_PER_SECTOR;
     sector->child_sector_ids = (int*)malloc(sector->children_capacity * sizeof(int));
     sector->num_children = 0;
     sector->sector_type = RAY_SECTOR_ROOT;
-    sector->is_solid = 0;  /* Not solid by default */
-    sector->nesting_level = 0;  /* Root level */
+    sector->is_solid = 0;
+    sector->nesting_level = 0;
+    */
     
     return sector;
 }
@@ -138,7 +140,8 @@ void ray_sector_free(RAY_Sector *sector)
     if (sector->vertices) free(sector->vertices);
     if (sector->walls) free(sector->walls);
     if (sector->portal_ids) free(sector->portal_ids);
-    if (sector->child_sector_ids) free(sector->child_sector_ids);
+    // BUILD_ENGINE: No hierarchy fields to free
+    // if (sector->child_sector_ids) free(sector->child_sector_ids);
     
     free(sector);
 }
@@ -196,26 +199,16 @@ RAY_Sector* ray_find_sector_at_point(RAY_Engine *engine, float x, float y)
         return &engine->sectors[candidates[0]];
     }
     
-    /* Multiple sectors (nested) - find the deepest one */
-    int best_idx = candidates[0];
-    int max_nesting = engine->sectors[best_idx].nesting_level;
-    
-    for (int i = 1; i < candidate_count; i++) {
-        int idx = candidates[i];
-        int nesting = engine->sectors[idx].nesting_level;
-        
-        if (nesting > max_nesting) {
-            best_idx = idx;
-            max_nesting = nesting;
-        }
-    }
-    
-    return &engine->sectors[best_idx];
+    /* BUILD_ENGINE: Multiple overlapping sectors - just return first match
+     * In pure Build Engine, sectors don't overlap (they're connected by portals)
+     * For now: Return first candidate
+     */
+    return &engine->sectors[candidates[0]];
 }
 
 
 
-/* Find sector at (x,y,z) - handles solid nested sectors correctly */
+/* Find sector at (x,y,z) - handles nested sectors correctly */
 RAY_Sector* ray_find_sector_at_position(RAY_Engine *engine, float x, float y, float z)
 {
     if (!engine) return NULL;
@@ -238,70 +231,115 @@ RAY_Sector* ray_find_sector_at_position(RAY_Engine *engine, float x, float y, fl
         return NULL;
     }
     
-    /* Only one sector - return it */
-    if (candidate_count == 1) {
-        return &engine->sectors[candidates[0]];
+    static int debug_counter = 0;
+    int should_debug = 0; // Debug disabled
+    
+    if (should_debug && candidate_count > 0) {
+        printf("DEBUG sector_detection: Found %d candidates at (%.1f, %.1f, %.1f): ", 
+               candidate_count, x, y, z);
+        for (int i = 0; i < candidate_count; i++) {
+            printf("S%d ", candidates[i]);
+        }
+        printf("\n");
     }
     
-    /* Multiple sectors - filter by Z for Solid Sectors */
-    /* Sort/Selection logic:
-       We want the deepest nested sector that actually contains the point Z.
-       If a nested sector is SOLID, we must be inside its Z range [floor, ceil].
-       If we are outside its Z range, we ignore it (unless it's the only option?).
-    */
-    
-    int best_idx = -1;
-    int max_nesting = -1;
-    
-    /* First pass: valid solid sectors or non-solid sectors */
-    for (int i = 0; i < candidate_count; i++) {
-        int idx = candidates[i];
-        RAY_Sector *s = &engine->sectors[idx];
+    /* Only one sector - check if it has children that also contain the point */
+    if (candidate_count == 1) {
+        RAY_Sector *sector = &engine->sectors[candidates[0]];
         
-        int is_valid = 1;
-        if (s->is_solid) {
-             // For solid sectors (platforms), we must be within vertical bounds
-             // If we are ON TOP (z >= ceiling - epsilon), we are technically outside/above, so use parent.
-             if (z < s->floor_z || z >= s->ceiling_z - 0.1f) {
-                 is_valid = 0;
-             }
+        if (should_debug) {
+            printf("  Starting from S%d, checking %d children\n", 
+                   sector->sector_id, sector->num_children);
         }
         
-        if (is_valid) {
-            if (s->nesting_level > max_nesting) {
-                max_nesting = s->nesting_level;
-                best_idx = idx;
+        /* CRITICAL: Check children recursively to find deepest containing sector */
+        int found_deeper = 1;
+        while (found_deeper) {
+            found_deeper = 0;
+            
+            for (int c = 0; c < sector->num_children; c++) {
+                int child_id = sector->child_sector_ids[c];
+                if (child_id < 0 || child_id >= engine->num_sectors) continue;
+                
+                RAY_Sector *child = &engine->sectors[child_id];
+                
+                /* Check if child contains the point */
+                if (ray_point_in_polygon(x, y, child->vertices, child->num_vertices)) {
+                    /* Check Z bounds for solid sectors */
+                    int z_valid = 1;
+                    if (ray_sector_is_solid(child)) {
+                        if (z < child->floor_z || z >= child->ceiling_z - 0.1f) {
+                            z_valid = 0;
+                        }
+                    }
+                    
+                    if (z_valid) {
+                        if (should_debug) {
+                            printf("    Found deeper: S%d -> S%d (has %d children)\n", 
+                                   sector->sector_id, child->sector_id, child->num_children);
+                        }
+                        sector = child;
+                        found_deeper = 1;
+                        break; // Found deeper sector, restart search from this child
+                    }
+                }
             }
         }
+        
+        if (should_debug) {
+            printf("  Final result: S%d\n", sector->sector_id);
+        }
+        
+        return sector;
     }
     
-    /* If we found a valid sector, return it */
-    if (best_idx != -1) {
-        return &engine->sectors[best_idx];
+    /* Multiple sectors - find the SMALLEST one (most specific) */
+    RAY_Sector *smallest_sector = NULL;
+    float min_area = FLT_MAX;
+    
+    if (should_debug) {
+        printf("  Multiple candidates, searching for smallest\n");
     }
     
-    /* Fallback: If no sector matched Z constraints (e.g. we are above a solid platform),
-       return the sector with the highest nesting level that is NOT the rejected solid one?
-       Actually, if we are above the solid platform, we are likely in the Parent Sector.
-       The Parent Sector should be in the candidates list.
-       And usually Parent is NOT solid (it's the room).
-       So the loop above should have picked the Parent (valid, non-solid) if it has higher nesting than... -1.
-       
-       Example: Room (Level 0, Non-Solid), Platform (Level 1, Solid).
-       Candidates: Room, Platform.
-       Loop:
-       - Room: Valid (Non-Solid). Nesting 0. Best=Room.
-       - Platform: Check Z. If Z > Ceil -> Invalid.
-       Result: Room. Correct!
-       
-       Example 2: Inside the Platform.
-       - Room: Valid. Nesting 0. Best=Room.
-       - Platform: Check Z. Inside. Valid. Nesting 1. Best=Platform.
-       Result: Platform. Correct!
-    */
+    /* Check each candidate and find which one has smallest area */
+    for (int i = 0; i < candidate_count; i++) {
+        int idx = candidates[i];
+        RAY_Sector *candidate = &engine->sectors[idx];
+        
+        /* Check if this candidate is valid (Z bounds for solid sectors) */
+        int is_valid = 1;
+        if (ray_sector_is_solid(candidate)) {
+            if (z < candidate->floor_z || z >= candidate->ceiling_z - 0.1f) {
+                is_valid = 0;
+            }
+        }
+        
+        if (!is_valid) continue;
+        
+        /* Calculate approximate area using bounding box */
+        float area = (candidate->max_x - candidate->min_x) * (candidate->max_y - candidate->min_y);
+        
+        if (should_debug) {
+            printf("    Candidate S%d: area=%.1f, valid=%d\n", 
+                   idx, area, is_valid);
+        }
+        
+        /* Keep track of smallest valid sector */
+        if (area < min_area) {
+            min_area = area;
+            smallest_sector = candidate;
+        }
+    }
     
-    /* If everything failed (e.g. we are in void?), return the first candidate or NULL? */
-    /* Return the standard find result (highest nesting) as fallback */
+    if (should_debug && smallest_sector) {
+        printf("  Final result: S%d (area=%.1f)\n", smallest_sector->sector_id, min_area);
+    }
+    
+    if (smallest_sector) {
+        return smallest_sector;
+    }
+    
+    /* Fallback */
     return ray_find_sector_at_point(engine, x, y);
 }
 

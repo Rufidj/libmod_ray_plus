@@ -6,7 +6,6 @@
  */
 
 #include "libmod_ray.h"
-#include "libmod_ray_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -38,9 +37,6 @@ static int16_t dplc[MAXSCREENWIDTH];   // Lower portal clip
 static int16_t uwall[MAXSCREENWIDTH];  // Upper wall boundary
 static int16_t dwall[MAXSCREENWIDTH];  // Lower wall boundary
 
-// Forward declaration
-void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, int from_sector_id);
-
 // Base clipping arrays (from EDuke32) - preserve initial clipping state
 static int16_t startumost[MAXSCREENWIDTH];  // Base upper clipping
 static int16_t startdmost[MAXSCREENWIDTH];  // Base lower clipping
@@ -51,8 +47,7 @@ static int32_t lwall[MAXSCREENWIDTH];  // Wall texture coordinate
 
 // Screen dimensions
 static int32_t xdimen, ydimen;
-// View dimensions (non-static so decal renderer can access them)
-int32_t halfxdimen, halfydimen;
+static int32_t halfxdimen, halfydimen;
 static int32_t viewingrange;
 
 // Framebuffer
@@ -238,139 +233,6 @@ static void wallmost(int16_t *mostbuf, int32_t w, float z_height)
         
         mostbuf[x] = (int16_t)screen_y;
     }
-}
-
-
-/* ============================================================================
-   DECAL RENDERING (MOVED FROM libmod_ray_render_decals.c)
-   ============================================================================ */
-
-/* Helper function to project a floor/ceiling point to screen space */
-static void project_floor_point(float world_x, float world_y, float world_z,
-                                 float cam_x, float cam_y, float cam_z, float cam_rot,
-                                 int *screen_x, int *screen_y) {
-    /* Transform to camera space */
-    float dx = world_x - cam_x;
-    float dy = world_y - cam_y;
-    float dz = world_z - cam_z;
-    
-    float cos_rot = cosf(cam_rot);
-    float sin_rot = sinf(cam_rot);
-    
-    float cam_space_x = dx * cos_rot + dy * sin_rot;
-    float cam_space_y = -dx * sin_rot + dy * cos_rot;
-    
-    /* Project to screen */
-    if (cam_space_x < 0.1f) cam_space_x = 0.1f; // Prevent behind camera
-    
-    float view_dist = g_engine.viewDist;
-    int horizon_y = g_engine.displayHeight / 2 + (int)g_engine.camera.pitch;
-    
-    *screen_x = g_engine.displayWidth / 2 + (int)((cam_space_y * view_dist) / cam_space_x);
-    *screen_y = horizon_y - (int)((dz * view_dist) / cam_space_x);
-}
-
-/* Render a floor sprite (horizontal sprite on floor/ceiling) */
-static void render_floor_sprite(GRAPH *dest, RAY_Decal *sprite, RAY_Sector *sector) {
-    if (!sprite || !sector) return;
-    
-    /* Get texture */
-    GRAPH *texture = bitmap_get(g_engine.fpg_id, sprite->texture_id);
-    if (!texture) return;
-    
-    /* Camera info */
-    float cam_x = g_engine.camera.x;
-    float cam_y = g_engine.camera.y;
-    float cam_z = g_engine.camera.z;
-    float cam_rot = g_engine.camera.rot;
-    
-    /* Sprite Z position (floor or ceiling) */
-    float sprite_z = sprite->is_floor ? sector->floor_z : sector->ceiling_z;
-    
-    /* Calculate 4 corners in world space */
-    float half_w = sprite->width / 2.0f;
-    float half_h = sprite->height / 2.0f;
-    
-    /* Apply rotation */
-    float cos_r = cosf(sprite->rotation);
-    float sin_r = sinf(sprite->rotation);
-    
-    float corners_world[4][2];
-    // Top-left
-    corners_world[0][0] = sprite->x + (-half_w * cos_r - -half_h * sin_r);
-    corners_world[0][1] = sprite->y + (-half_w * sin_r + -half_h * cos_r);
-    // Top-right
-    corners_world[1][0] = sprite->x + (half_w * cos_r - -half_h * sin_r);
-    corners_world[1][1] = sprite->y + (half_w * sin_r + -half_h * cos_r);
-    // Bottom-right
-    corners_world[2][0] = sprite->x + (half_w * cos_r - half_h * sin_r);
-    corners_world[2][1] = sprite->y + (half_w * sin_r + half_h * cos_r);
-    // Bottom-left
-    corners_world[3][0] = sprite->x + (-half_w * cos_r - half_h * sin_r);
-    corners_world[3][1] = sprite->y + (-half_w * sin_r + half_h * cos_r);
-    
-    /* Project corners to screen space */
-    int screen_x[4], screen_y[4];
-    for (int i = 0; i < 4; i++) {
-        project_floor_point(corners_world[i][0], corners_world[i][1], sprite_z,
-                           cam_x, cam_y, cam_z, cam_rot,
-                           &screen_x[i], &screen_y[i]);
-    }
-    
-    /* Calculate center and approximate scale */
-    int center_x = (screen_x[0] + screen_x[1] + screen_x[2] + screen_x[3]) / 4;
-    int center_y = (screen_y[0] + screen_y[1] + screen_y[2] + screen_y[3]) / 4;
-    
-    /* Calculate scale based on projected size */
-    float dx01 = (float)(screen_x[1] - screen_x[0]);
-    float dy01 = (float)(screen_y[1] - screen_y[0]);
-    float dx03 = (float)(screen_x[3] - screen_x[0]);
-    float dy03 = (float)(screen_y[3] - screen_y[0]);
-    
-    float width_screen = sqrtf(dx01 * dx01 + dy01 * dy01);
-    float height_screen = sqrtf(dx03 * dx03 + dy03 * dy03);
-    
-    if (width_screen < 1.0f || height_screen < 1.0f) return; // Too small
-    
-    double scale_x = (width_screen / (double)texture->width) * 100.0;
-    double scale_y = (height_screen / (double)texture->height) * 100.0;
-    
-    /* Calculate rotation angle in screen space */
-    double angle = atan2(dy01, dx01) * 180.0 / M_PI;
-    
-    /* Render using gr_blit with transformation */
-    gr_blit(dest,                           // destination
-            NULL,                           // clip region
-            (double)center_x,               // screen x
-            (double)center_y,               // screen y
-            0,                              // flags
-            (int64_t)angle,                 // angle in degrees
-            scale_x,                        // scale x (percentage)
-            scale_y,                        // scale y (percentage)
-            0.0,                            // center x offset
-            0.0,                            // center y offset
-            texture,                        // source graph
-            NULL,                           // source clip
-            (uint8_t)(sprite->alpha * 255), // alpha
-            255, 255, 255,                  // color tint (white = no tint)
-            0,                              // blend mode (normal)
-            NULL);                          // custom blend
-}
-
-void render_sector_decals(GRAPH *dest, int sector_id) {
-    /* DECALS ARE NOW PRE-BAKED INTO FLOOR/CEILING TEXTURES
-     * 
-     * Decals are composited into floor/ceiling textures at map load time
-     * by ray_bake_decals() in libmod_ray_decal_baking.c
-     * 
-     * This achieves:
-     * - Perfect perspective projection (same as floor rendering)
-     * - Zero runtime cost
-     * - Ideal for static details (road lines, puddles, stains, etc.)
-     * 
-     * No runtime rendering is needed.
-     */
-    return;
 }
 
 /* ============================================================================
@@ -1052,15 +914,15 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x, int max_x
                  if (sect_floor > 0) y_near_bot = -32000; else y_near_bot = 32000;
             }
             
+            // EDuke32-style clipping: Intersection of current and base clipping
+            // This preserves clipping from parent sectors while allowing nested rendering
+            // max(umost, startumost) = most restrictive upper bound
+            // min(dmost, startdmost) = most restrictive lower bound
+            int min_y = (umost[x] > startumost[x]) ? umost[x] : startumost[x];
+            int max_y = (dmost[x] < startdmost[x]) ? dmost[x] : startdmost[x];
             
-            // CRITICAL FIX: Solid sectors should NOT inherit clipping from parent
-            // They are rendered as independent 3D boxes with full vertical range
-            // Using umost/dmost here causes lids (caps) to clip incorrectly
-            int min_y = 0;  // Full screen top
-            int max_y = g_engine.displayHeight - 1;  // Full screen bottom
-            
-            // Clipping is now full screen range for solid sectors
-            // This ensures lids (top/bottom caps) render completely
+            // Clipping now correctly inherits from parent sectors
+            // while preserving base screen bounds
             
             int draw_top = (y_near_top < min_y) ? min_y : y_near_top;
             int draw_bot = (y_near_bot > max_y) ? max_y : y_near_bot;
@@ -1378,29 +1240,29 @@ static void render_hole_stencil(GRAPH *dest, int sector_id, int min_x, int max_x
     }
     
     // Render nested children of solid sectors
-    printf("RAY: render_solid_sector(%d) checking children: num_children=%d\n", sector->sector_id, ray_sector_get_num_children(sector));
+    printf("RAY: render_solid_sector(%d) checking children: num_children=%d\n", sector->sector_id, sector->num_children);
     
-    if (ray_sector_has_children(sector)) {
-        printf("RAY: render_solid_sector(%d) has %d children, rendering them now\n", sector->sector_id, ray_sector_get_num_children(sector));
+    if (sector->num_children > 0 && sector->child_sector_ids) {
+        printf("RAY: render_solid_sector(%d) has %d children, rendering them now\n", sector->sector_id, sector->num_children);
         
-        for (int i = 0; i < ray_sector_get_num_children(sector); i++) {
-            int child_id = ray_sector_get_child(sector, i);
+        for (int i = 0; i < sector->num_children; i++) {
+            int child_id = sector->child_sector_ids[i];
             RAY_Sector *child = &g_engine.sectors[child_id];
             
-            printf("RAY: render_solid_sector(%d) processing child %d (solid=%d)\n", sector->sector_id, child_id, ray_sector_is_solid(child));
+            printf("RAY: render_solid_sector(%d) processing child %d (solid=%d)\n", sector->sector_id, child_id, child->is_solid);
             
             if (!ray_aabb_visible(child)) {
                 printf("RAY: Child %d not visible, skipping\n", child_id);
                 continue;
             }
             
-            if (ray_sector_is_solid(child)) {
+            if (child->is_solid) {
                 printf("RAY: Calling render_solid_sector for child %d\n", child_id);
                 render_solid_sector(dest, child_id, min_x, max_x);
             } else {
                 printf("RAY: Calling render_hole_stencil + render_sector for child %d\n", child_id);
                 render_hole_stencil(dest, child_id, min_x, max_x);
-                render_sector(dest, child_id, min_x, max_x, 0, sector_id);
+                render_sector(dest, child_id, min_x, max_x, 0);
             }
         }
     }
@@ -1411,7 +1273,7 @@ static int sectors_rendered_this_frame = 0;  // Debug counter
 static uint8_t *sector_visited = NULL;  // Visited tracking array
 static int sector_visited_capacity = 0;
 
-void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, int from_sector_id)
+void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth)
 {
     // CRITICAL: Prevent infinite recursion
     if (depth > 32) {
@@ -1452,8 +1314,6 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, 
     
     // Count ONLY sectors that actually get rendered (after all checks)
     sectors_rendered_this_frame++;
-    
-
     
     // Project all walls in this sector
     for (int w = 0; w < sector->num_walls; w++) {
@@ -1524,7 +1384,7 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, 
         // Caps require polygon rendering inside the wall loop, which is not yet implemented.
         // For wall-to-ceiling columns, this is perfect.
         int draw_flags = 3; // Default: Wall + Floor/Ceil
-        if (ray_sector_is_solid(sector)) {
+        if (sector->is_solid || sector->sector_type == RAY_SECTOR_NESTED_COLUMN || sector->sector_type == RAY_SECTOR_NESTED_BOX) {
             draw_flags = 1; // Wall Only
         }
 
@@ -1798,11 +1658,9 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, 
                 }
             }
             
-
-            
             // Recursion
             if (portal_visible) {
-                 render_sector(dest, next_sector_id, draw_x1, draw_x2, depth + 1, sector_id);
+                 render_sector(dest, next_sector_id, draw_x1, draw_x2, depth + 1);
             }
             
             // Restore clipping arrays
@@ -1814,9 +1672,7 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, 
             
             // Draw Upper Step (Ceiling transition)
             GRAPH *upper_tex = NULL;
-            if (wall->texture_id_upper > 0) {
-                upper_tex = bitmap_get(g_engine.fpg_id, wall->texture_id_upper);
-            }
+            if (wall->texture_id_upper > 0) upper_tex = bitmap_get(g_engine.fpg_id, wall->texture_id_upper);
             
             if (upper_tex) {
                  draw_wall_segment_linear(dest, sx1, sx2,
@@ -1857,84 +1713,78 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth, 
                                       z1, z2, NULL, 0, 0, 
                                       wall, sector,
                                       min_x, max_x, 2); // flag 2 = FLOOR/CEIL ONLY (skip wall)
-         }
+        }
     }
 
-    // ========================================================================
-    // RENDER NESTED SECTORS (CHILDREN AND SIBLINGS)
-    // ========================================================================
-    
-    #define MAX_NESTED_DEPTH 8
-    
-    // ========================================================================
-    // Render nested child sectors
-    // ========================================================================
-    if (depth < MAX_NESTED_DEPTH && sector->num_children > 0) {
-        for (int c = 0; c < sector->num_children; c++) {
-            int child_id = sector->child_sector_ids[c];
-            
-            // Find child sector index
-            int child_index = -1;
-            for (int i = 0; i < g_engine.num_sectors; i++) {
-                if (g_engine.sectors[i].sector_id == child_id) {
-                    child_index = i;
-                    break;
-                }
+    // Render Nested Sectors (Children) - Islands, Columns, Solid Objects
+    if (sector->num_children > 0 && sector->child_sector_ids) {
+        for (int i = 0; i < sector->num_children; i++) {
+            int child_id = sector->child_sector_ids[i];
+            RAY_Sector *child = &g_engine.sectors[child_id];
+
+            // OPTIMIZATION: Frustum Culling
+            if (!ray_aabb_visible(child)) {
+                // g_engine.stats.culled_sectors++; // Optional stat
+                continue; 
             }
             
-            if (child_index < 0) continue;
             
-            // Skip if already visited
-            if (sector_visited && child_index < sector_visited_capacity) {
-                if (sector_visited[child_index]) continue;
-            }
-            
-            RAY_Sector *child_sector = &g_engine.sectors[child_index];
-            
-            // CRITICAL FIX: Use different rendering for solid vs non-solid child sectors
-            // Solid sectors (buildings) need render_solid_sector to draw lids (caps)
-            // Non-solid sectors (pits, rooms) need render_sector with reset clipping
-            
-            if (ray_sector_is_solid(child_sector)) {
-                // SOLID SECTOR (Building/Box): Use specialized renderer with lids
-                // This function renders the sector as a 3D box with top/bottom caps
-                render_solid_sector(dest, child_index, min_x, max_x);
+            if (child->is_solid) {
+                 // Always render solid sectors using render_solid_sector
+                 // This draws the walls (skipping portal walls automatically)
+                 render_solid_sector(dest, child_id, min_x, max_x);
+                 
+                 // If this solid sector has children, render them through the portals
+                 if (child->num_children > 0 && child->child_sector_ids) {
+                     for (int j = 0; j < child->num_children; j++) {
+                         int grandchild_id = child->child_sector_ids[j];
+                         RAY_Sector *grandchild = &g_engine.sectors[grandchild_id];
+                         
+                         if (!ray_aabb_visible(grandchild)) {
+                             continue;
+                         }
+                         
+                         // Save clipping state BEFORE each grandchild
+                         // This prevents grandchildren from interfering with each other
+                         int16_t saved_umost[MAXSCREENWIDTH];
+                         int16_t saved_dmost[MAXSCREENWIDTH];
+                         memcpy(saved_umost, umost, sizeof(umost));
+                         memcpy(saved_dmost, dmost, sizeof(dmost));
+                         
+                         // RESET clipping to full screen for nested solid sectors
+                         // This allows them to render their full geometry independently
+                         // Z-buffer will handle occlusion
+                         for (int x = min_x; x <= max_x && x < MAXSCREENWIDTH; x++) {
+                             umost[x] = 0;
+                             dmost[x] = g_engine.displayHeight - 1;
+                         }
+                         
+                         // FIX: Do NOT reset clipping to full screen
+                         // Inherit clipping from parent (saved_umost/saved_dmost)
+                         // This preserves correct clipping through multiple nesting levels
+                         // matching Build Engine original behavior
+                         
+                         // Recursively render the grandchild
+                         if (grandchild->is_solid) {
+                             // Use render_solid_sector (with inside-fix) to handle solid objects/rooms
+                             render_solid_sector(dest, grandchild_id, min_x, max_x);
+                         } else {
+                             render_hole_stencil(dest, grandchild_id, min_x, max_x);
+                             render_sector(dest, grandchild_id, min_x, max_x, depth + 1);
+                         }
+                         
+                         // Restore clipping state AFTER each grandchild
+                         memcpy(umost, saved_umost, sizeof(umost));
+                         memcpy(dmost, saved_dmost, sizeof(dmost));
+                     }
+                 }
             } else {
-                // NON-SOLID SECTOR (Pit/Room): Use normal renderer with reset clipping
-                int16_t saved_umost[MAXSCREENWIDTH];
-                int16_t saved_dmost[MAXSCREENWIDTH];
-                
-                // Determine the range to save/restore
-                int save_min_x = (min_x < 0) ? 0 : min_x;
-                int save_max_x = (max_x >= g_engine.displayWidth) ? g_engine.displayWidth - 1 : max_x;
-                
-                // Save current clipping state
-                for (int x = save_min_x; x <= save_max_x; x++) {
-                    saved_umost[x] = umost[x];
-                    saved_dmost[x] = dmost[x];
-                    
-                    // Reset to full screen range
-                    umost[x] = 0;
-                    dmost[x] = g_engine.displayHeight - 1;
-                }
-                
-                // Render child sector with reset clipping
-                render_sector(dest, child_index, min_x, max_x, depth + 1, sector_id);
-                
-                // Restore clipping state
-                for (int x = save_min_x; x <= save_max_x; x++) {
-                    umost[x] = saved_umost[x];
-                    dmost[x] = saved_dmost[x];
-                }
+                 // Normal non-solid sector
+                 render_hole_stencil(dest, child_id, min_x, max_x);
+                 render_sector(dest, child_id, min_x, max_x, depth + 1);
             }
         }
     }
-    
-    // ========================================================================
-    // RENDER DECALS for this sector (floor/ceiling overlays)
-    // MOVED TO END: Render AFTER everything else to prevent overwriting
-    // ========================================================================
-    render_sector_decals(dest, sector_id);
 }
 
 // Forward decl
@@ -2221,9 +2071,8 @@ void ray_render_frame_build(GRAPH *dest)
     struct timespec prof_start, prof_end;
     clock_gettime(CLOCK_MONOTONIC, &prof_start);
     
-    // Build Engine standard: Render camera sector and recursively through portals
-    // All visible geometry MUST be connected by portals
-    render_sector(dest, camera_sector_id, 0, xdimen - 1, 0, -1);
+    // Start recursive rendering
+    render_sector(dest, camera_sector_id, 0, xdimen - 1, 0);
     
     clock_gettime(CLOCK_MONOTONIC, &prof_end);
     double sector_time = (prof_end.tv_sec - prof_start.tv_sec) * 1000.0 + 
@@ -2235,10 +2084,6 @@ void ray_render_frame_build(GRAPH *dest)
     clock_gettime(CLOCK_MONOTONIC, &prof_end);
     double sprite_time = (prof_end.tv_sec - prof_start.tv_sec) * 1000.0 + 
                          (prof_end.tv_nsec - prof_start.tv_nsec) / 1000000.0;
-                       // Draw sprites (already implemented above via ray_render_sprite calls in sorted loop)
-    #if 0
-    render_sprites(dest);
-    #endif
     
     // Commit software buffer to GPU texture
     frame_commit(dest);

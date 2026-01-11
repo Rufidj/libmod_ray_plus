@@ -9,6 +9,7 @@
  */
 
 #include "libmod_ray.h"
+#include "libmod_ray_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -113,8 +114,8 @@ void render_sector_column_recursive(
         float hit_y = g_engine.camera.y + hit->distance * -sinf(ray_angle);
         
         /* Check all child sectors */
-        for (int c = 0; c < sector->num_children; c++) {
-            int child_id = sector->child_sector_ids[c];
+        for (int c = 0; c < ray_sector_get_num_children(sector); c++) {
+            int child_id = ray_sector_get_child(sector, c);
             if (child_id < 0 || child_id >= g_engine.num_sectors) continue;
             
             RAY_Sector *child = &g_engine.sectors[child_id];

@@ -4,6 +4,7 @@
  */
 
 #include "libmod_ray.h"
+#include "libmod_ray_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -399,8 +400,8 @@ void ray_draw_wall_strip(GRAPH *dest, RAY_RayHit *rayHit, int screen_x,
         
         /* For solid child sectors WITHOUT ceiling texture, do NOT update ceiling_clip */
         /* This allows parent ceiling to render through them */
-        int skip_ceiling_clip = (wall_sector && wall_sector->parent_sector_id >= 0 && 
-                                 wall_sector->is_solid && wall_sector->ceiling_texture_id <= 0);
+        int skip_ceiling_clip = (wall_sector && ray_sector_get_parent(wall_sector) >= 0 && 
+                                 ray_sector_is_solid(wall_sector) && wall_sector->ceiling_texture_id <= 0);
         
         if (!skip_ceiling_clip) {
             /* Normal clipping: ceiling can't render below wall */
@@ -464,7 +465,7 @@ void ray_draw_floor_ceiling(GRAPH *dest, int screen_x, float ray_angle,
     if (!sector) return;
 
     /* Detect Solid Child Sector Mode (External View) */
-    int is_solid_child = (sector->parent_sector_id >= 0 && sector->is_solid);
+    int is_solid_child = (ray_sector_get_parent(sector) >= 0 && ray_sector_is_solid(sector));
     
     /* Determine surfaces to draw based on camera position relative to sector */
     /* DEFAULT (Interior View): Top is Ceiling, Bottom is Floor */
@@ -851,8 +852,8 @@ void ray_render_frame(GRAPH *dest)
                 int is_solid_child = 0;
                 for (int i = 0; i < g_engine.num_sectors; i++) {
                     if (g_engine.sectors[i].sector_id == hit->sector_id &&
-                        g_engine.sectors[i].parent_sector_id >= 0 &&
-                        g_engine.sectors[i].is_solid) {
+                        ray_sector_get_parent(&g_engine.sectors[i]) >= 0 &&
+                        ray_sector_is_solid(&g_engine.sectors[i])) {
                         is_solid_child = 1;
                         break;
                     }
@@ -944,7 +945,7 @@ void ray_render_frame(GRAPH *dest)
                     }
                 }
                 
-                if (sec && sec->parent_sector_id >= 0) {
+                if (sec && ray_sector_get_parent(sec) >= 0) {
                      hits[h].is_child_sector = 1;
                 }
             }
@@ -983,7 +984,7 @@ void ray_render_frame(GRAPH *dest)
                 }
                 
                 /* Only skip hollow children (they have their own floor/ceiling) */
-                if (child_sector && !child_sector->is_solid) {
+                if (child_sector && !ray_sector_is_solid(child_sector)) {
                     /* Update current_dist to skip over hollow child sector */
                     if (hit->distance > current_dist) {
                         current_dist = hit->distance;

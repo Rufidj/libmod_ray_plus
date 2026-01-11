@@ -29,6 +29,7 @@ DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
     FUNC("RAY_STRAFE_RIGHT", "F", TYPE_INT, libmod_ray_strafe_right),
     FUNC("RAY_ROTATE", "F", TYPE_INT, libmod_ray_rotate),
     FUNC("RAY_LOOK_UP_DOWN", "F", TYPE_INT, libmod_ray_look_up_down),
+    FUNC("RAY_MOVE_UP_DOWN", "F", TYPE_INT, libmod_ray_move_up_down),
     FUNC("RAY_JUMP", "", TYPE_INT, libmod_ray_jump),
     FUNC("RAY_SET_CAMERA", "FFFFF", TYPE_INT, libmod_ray_set_camera),
     FUNC("RAY_GET_CAMERA_X", "", TYPE_FLOAT, libmod_ray_get_camera_x),
@@ -58,9 +59,20 @@ DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
     FUNC("RAY_SET_SPRITE_MD2", "III", TYPE_INT, libmod_ray_set_sprite_md2),
     FUNC("RAY_SET_SPRITE_ANIM", "IIIF", TYPE_INT, libmod_ray_set_sprite_anim),
     FUNC("RAY_SET_SPRITE_ANGLE", "IF", TYPE_INT, libmod_ray_set_sprite_angle),
+    FUNC("RAY_SET_SPRITE_SCALE", "IF", TYPE_INT, libmod_ray_set_sprite_scale),
     FUNC("RAY_GET_FLOOR_HEIGHT", "FF", TYPE_FLOAT, libmod_ray_get_floor_height),
     FUNC("RAY_GET_TAG_POINT", "ISPPP", TYPE_INT, libmod_ray_get_tag_point),
     FUNC("RAY_SET_TEXTURE_QUALITY", "I", TYPE_INT, libmod_ray_set_texture_quality),
+    
+    // Cámaras cinemáticas
+    FUNC("RAY_CAMERA_LOAD", "S", TYPE_INT, libmod_ray_camera_load),
+    FUNC("RAY_CAMERA_CREATE_TEST", "", TYPE_INT, libmod_ray_camera_create_test),
+    FUNC("RAY_CAMERA_PLAY", "I", TYPE_INT, libmod_ray_camera_play),
+    FUNC("RAY_CAMERA_STOP", "", TYPE_INT, libmod_ray_camera_stop),
+    FUNC("RAY_CAMERA_PAUSE", "", TYPE_INT, libmod_ray_camera_pause),
+    FUNC("RAY_CAMERA_IS_PLAYING", "", TYPE_INT, libmod_ray_camera_is_playing),
+    FUNC("RAY_CAMERA_UPDATE", "F", TYPE_INT, libmod_ray_camera_update),
+    
     FUNC(NULL, NULL, 0, NULL)
 };
 

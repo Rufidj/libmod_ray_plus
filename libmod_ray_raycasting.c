@@ -4,6 +4,7 @@
  */
 
 #include "libmod_ray.h"
+#include "libmod_ray_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -268,17 +269,17 @@ void ray_cast_ray(RAY_Engine *engine, float ray_angle, int strip_idx,
         }
         
         /* NESTED SECTORS FIX: Check child sector walls */
-        if (sector->num_children > 0 && sector->child_sector_ids) {
+        if (ray_sector_has_children(sector)) {
             static int child_loop_debug = 0;
             if (child_loop_debug < 20 && depth == 0) {
                 printf("DEBUG RAYCAST: Sector %d has %d children. FirstChild=%d\n", 
-                       sector->sector_id, sector->num_children, sector->child_sector_ids[0]);
+                       sector->sector_id, ray_sector_get_num_children(sector), ray_sector_get_child(sector, 0));
                 fflush(stdout);
                 child_loop_debug++;
             }
 
-            for (int child_idx = 0; child_idx < sector->num_children; child_idx++) {
-                int child_id = sector->child_sector_ids[child_idx];
+            for (int child_idx = 0; child_idx < ray_sector_get_num_children(sector); child_idx++) {
+                int child_id = ray_sector_get_child(sector, child_idx);
                 if (child_id < 0 || child_id >= engine->num_sectors) continue;
                 
                 RAY_Sector *child_sector = &engine->sectors[child_id];
@@ -464,27 +465,104 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
 {
     if (!engine) return 1;  /* Blocked by default */
     
-    /* Find sector at new position */
-    RAY_Sector *new_sector = ray_find_sector_at_point(engine, new_x, new_y);
+    /* Find sector at new position - use ray_find_sector_at_position for nested sectors */
+    RAY_Sector *new_sector = ray_find_sector_at_position(engine, new_x, new_y, z);
     
     if (!new_sector) {
+        printf("COLLISION DEBUG: No sector at new position (%.1f, %.1f) - BLOCKED\n", new_x, new_y);
         return 1;  /* Outside all sectors - blocked */
     }
     
     /* Find sector at current position */
-    RAY_Sector *current_sector = ray_find_sector_at_point(engine, x, y);
+    RAY_Sector *current_sector = ray_find_sector_at_position(engine, x, y, z);
     
     if (!current_sector) {
+        printf("COLLISION DEBUG: No current sector - allowing move to S%d\n", new_sector->sector_id);
         return 0;  /* Currently outside - allow movement into sector */
     }
+    
+    printf("COLLISION DEBUG: Move from S%d to S%d\n", current_sector->sector_id, new_sector->sector_id);
     
     // Physics Constants
     float player_height = 32.0f; // Simplified player height
     float step_height = 32.0f;   // Max step up
     
     /* Special handling for SOLID sectors (Columns, Boxes) */
-    if (new_sector->is_solid) {
-        /* If it's a solid object, we can only move if we are ON TOP or BELOW (flying) */
+    if (ray_sector_is_solid(new_sector)) {
+        if (new_sector->sector_id != current_sector->sector_id)
+             printf("DEBUG: Enter SOLID Sec %d from %d\n", new_sector->sector_id, current_sector->sector_id);
+        int allowed_entry = 0;
+
+        /* 1. Check Hierarchy (Robust check for Parent <-> Nested Room) */
+        if (ray_sector_get_parent(new_sector) == current_sector->sector_id || 
+            ray_sector_get_parent(current_sector) == new_sector->sector_id) {
+            printf("DEBUG: Hierarchy Allow! %d <-> %d\n", new_sector->sector_id, current_sector->sector_id);
+            allowed_entry = 1;
+        }
+
+        /* 2. Check Portals (Fallback if hierarchy not set but portal exists) */
+        if (!allowed_entry) {
+            for (int i = 0; i < current_sector->num_portals; i++) {
+                int portal_id = current_sector->portal_ids[i];
+                for (int p = 0; p < engine->num_portals; p++) {
+                    if (engine->portals[p].portal_id == portal_id) {
+                        if (engine->portals[p].sector_a == new_sector->sector_id || 
+                            engine->portals[p].sector_b == new_sector->sector_id) {
+                            allowed_entry = 1;
+                            break;
+                        }
+                    }
+                }
+                if (allowed_entry) break;
+            }
+        }
+        
+        /* 3. Check Walls for Portal (Fallback if sector portal list is desync/empty) */
+        /* This guarantees that if a wall has a portal, we can pass, matching rendering logic */
+        if (!allowed_entry) {
+            for (int w = 0; w < current_sector->num_walls; w++) {
+                RAY_Wall *wall = &current_sector->walls[w];
+                if (wall->portal_id != -1) {
+                    // Check if this portal connects to new_sector
+                     for (int p = 0; p < engine->num_portals; p++) {
+                        if (engine->portals[p].portal_id == wall->portal_id) {
+                            if (engine->portals[p].sector_a == new_sector->sector_id || 
+                                engine->portals[p].sector_b == new_sector->sector_id) {
+                                allowed_entry = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (allowed_entry) break;
+            }
+        }
+        
+        /* If entry is allowed (e.g. walking into a nested room), we must still validate Z height */
+        /* i.e. we can't walk into a solid block, but we CAN walk into a solid room */
+        if (allowed_entry) {
+             // Standard Walkability Check for the nested sector
+             float floor_step = new_sector->floor_z - z;
+             float ceiling_headroom = new_sector->ceiling_z - z;
+             
+             // Step check (e.g., max 32 units up)
+             // Note: If floor_step is negative, we are stepping down (allowed)
+             if (floor_step > step_height) {
+                 printf("DEBUG: Block Trigger: Floor Step Too High %.1f > %.1f\n", floor_step, step_height);
+                 return 1; // Wall too high
+             }
+             
+             // Headroom check
+             // If ceiling is too low for player height
+             if (ceiling_headroom < player_height) {
+                 printf("DEBUG: Block Trigger: Headroom too low %.1f < %.1f\n", ceiling_headroom, player_height);
+                 return 1; // Bump head
+             }
+             
+             return 0; // Entry permitted
+        }
+
+        /* If NOT allowed entry (true solid object), trigger "On Top / Below" logic */
         
         /* Check bounds with slight margin */
         float margin = 5.0f; // Tolerance
@@ -524,6 +602,8 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
         // Assuming player_height is headroom needed.
         if (z + player_height <= new_sector->floor_z + margin) return 0; 
         
+        if (new_sector->sector_id != current_sector->sector_id)
+            printf("DEBUG: Block Trigger: Solid Sector Reject (Normal)\n");
         return 1; // Collision with solid body
     }
 
@@ -532,10 +612,10 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
     // Check floor collision (too high step)
     // If we want to climb a step, floor must be reachable.
     // If new_floor > z + step: Wall.
-    if (new_sector->floor_z > z + 32.0f && !new_sector->is_solid) return 1; 
+    if (new_sector->floor_z > z + 32.0f && !ray_sector_is_solid(new_sector)) return 1; 
     
     // Check ceiling (bump head)
-    if (new_sector->ceiling_z < z + 32.0f && !new_sector->is_solid) return 1;
+    if (new_sector->ceiling_z < z + 32.0f && !ray_sector_is_solid(new_sector)) return 1;
     
     /* If moving to same sector, allow (Z check passed) */
     if (new_sector->sector_id == current_sector->sector_id) {
@@ -543,7 +623,7 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
     }
     
     // Fix: Allow exiting a solid sector (if we were on top of it)
-    if (current_sector->is_solid) {
+    if (ray_sector_is_solid(current_sector)) {
         return 0;
     }
     
@@ -567,5 +647,8 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
     }
     
     /* No portal found - blocked (unless special case?) */
+    /* No portal found - blocked (unless special case?) */
+    if (new_sector->sector_id != current_sector->sector_id)
+        printf("DEBUG: Block Trigger: No Portal/Hierarchy connecting %d -> %d\n", current_sector->sector_id, new_sector->sector_id);
     return 1;
 }

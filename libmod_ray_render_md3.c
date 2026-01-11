@@ -68,6 +68,12 @@ void ray_render_md3(GRAPH *dest, RAY_Sprite *sprite) {
              float ly = y1 + interp * (y2 - y1);
              float lz = z1 + interp * (z2 - z1);
              
+             // Apply model scale (default 1.0 if not set)
+             float scale_factor = (sprite->model_scale > 0.0f) ? sprite->model_scale : 1.0f;
+             lx *= scale_factor;
+             ly *= scale_factor;
+             lz *= scale_factor;
+             
              // Model -> World
              float wx = lx * cos_model - ly * sin_model + sprite->x;
              float wy = lx * sin_model + ly * cos_model + sprite->y;
@@ -116,8 +122,9 @@ void ray_render_md3(GRAPH *dest, RAY_Sprite *sprite) {
             RAY_Point p2 = screen_verts[idx2];
             RAY_Point p3 = screen_verts[idx3];
             
-            float cross = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
-            if (cross <= 0) continue;
+            // Backface Culling disabled - some models have inconsistent normals
+            // float cross = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+            // if (cross <= 0) continue;
             
             // Texture Coords (Directly from array)
             // MD3 UVs are usually 0.0-1.0. We need to scale by texture size later in rasterizer.
@@ -242,7 +249,7 @@ static void draw_triangle_md3(GRAPH *dest, RAY_Point p1, RAY_Point p2, RAY_Point
     int y_start = (int)ceilf(top->y);
     int y_end = (int)ceilf(bot->y);
     int y_mid = (int)ceilf(mid->y);
-    if (y_start >= g_engine.displayWidth || y_end < 0) return; // Should be Height check? Yes displayHeight
+    if (y_start >= g_engine.displayHeight || y_end < 0) return;  // FIXED: was displayWidth
     
     Edge long_e, short_e;
     setup_edge_md3(&long_e, top, bot, *zt, *zb, ut, vt, ub, vb);
