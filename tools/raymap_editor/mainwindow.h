@@ -11,6 +11,8 @@
 #include <QCheckBox>
 #include <QGroupBox>
 #include <QListWidget>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QDockWidget>
 #include "mapdata.h"
 #include "grideditor.h"
@@ -44,6 +46,7 @@ private slots:
     void onFPGReloaded();
     void onOpenEffectGenerator();
     void onOpenCameraPathEditor();
+    void onOpenMeshGenerator(); // NEW: MD3 Generator
     
     // View menu
     void onZoomIn();
@@ -95,13 +98,15 @@ private slots:
     void onInsertDoor();        // Future
     void onInsertElevator();    // Future
     void onInsertStairs();      // Future
+    // void onGenerateRamp();      // REMOVED
     
     void onSetParentSector();  // Assign parent sector to selected sector    // Future
     
-    // Sector list (NEW)
-    void onSectorListItemClicked(QListWidgetItem *item);
-    void updateSectorList();  // Refresh the sector list
-    void onSectorListContextMenu(const QPoint &pos); // Context menu slot
+    // Sector tree (hierarchical)
+    void onSectorTreeItemClicked(QTreeWidgetItem *item, int column);
+    void onSectorTreeItemDoubleClicked(QTreeWidgetItem *item, int column);
+    void updateSectorList();  // Refresh the sector tree
+    void onSectorTreeContextMenu(const QPoint &pos); // Context menu slot
     
     // Sector operations
     void deleteSelectedSector();
@@ -144,8 +149,8 @@ private:
     QDockWidget *m_wallDock;
     QDockWidget *m_sectorListDock;  // NEW: List of all sectors
     
-    // Sector list
-    QListWidget *m_sectorListWidget;  // NEW
+    // Sector tree (hierarchical with groups)
+    QTreeWidget *m_sectorTree;  // NEW: Hierarchical sector tree
     
     // Sector controls
     QLabel *m_sectorIdLabel;

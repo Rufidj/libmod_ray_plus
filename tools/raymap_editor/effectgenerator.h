@@ -20,6 +20,7 @@ enum EffectType {
 
 struct Particle {
     QPointF position;
+    QPointF prevPosition;  // For motion trails
     QPointF velocity;
     QColor color;
     float size;
@@ -27,8 +28,11 @@ struct Particle {
     float alpha;
     float rotation;
     float angularVel;
+    float temperature;  // 0.0-1.0, for fire/heat effects
+    int type;          // Sub-type (0=normal, 1=core, 2=spark, 3=smoke)
     
-    Particle() : size(1.0f), life(1.0f), alpha(1.0f), rotation(0.0f), angularVel(0.0f) {}
+    Particle() : size(1.0f), life(1.0f), alpha(1.0f), rotation(0.0f), angularVel(0.0f), 
+                 temperature(0.5f), type(0) {}
 };
 
 struct EffectParams {
@@ -96,10 +100,17 @@ private:
     void updateEnergy(float time, float dt);
     void updateImpact(float time, float dt);
     
+    // Rendering helpers
+    void drawGlowParticle(QPainter &painter, const Particle &p, const QPointF &center);
+    void drawFireParticle(QPainter &painter, const Particle &p, const QPointF &center);
+    void drawExplosionParticle(QPainter &painter, const Particle &p, const QPointF &center);
+    void drawSmokeParticle(QPainter &painter, const Particle &p, const QPointF &center);
+    
     // Utilities
     float perlinNoise(float x, float y);
     QColor lerpColor(const QColor &a, const QColor &b, float t);
     float randomFloat(float min, float max);
+    QColor temperatureToColor(float temp);  // Convert temperature to realistic fire color
     
     EffectType m_type;
     EffectParams m_params;

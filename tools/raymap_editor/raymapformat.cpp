@@ -60,8 +60,8 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
     }
     
     /* Verify version */
-    if (version < 8 || version > 10) {
-        qWarning() << "Versión no soportada:" << version << "(solo v8-v10)";
+    if (version < 8 || version > 11) {
+        qWarning() << "Versión no soportada:" << version << "(solo v8-v11)";
         file.close();
         return false;
     }
@@ -97,6 +97,13 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
         in.readRawData(reinterpret_cast<char*>(&sector.floor_texture_id), sizeof(int));
         in.readRawData(reinterpret_cast<char*>(&sector.ceiling_texture_id), sizeof(int));
         in.readRawData(reinterpret_cast<char*>(&sector.light_level), sizeof(int));
+        
+        // Read group_id (v10+, default -1 for older versions)
+        if (version >= 10) {
+            in.readRawData(reinterpret_cast<char*>(&sector.group_id), sizeof(int));
+        } else {
+            sector.group_id = -1;
+        }
         
         /* Read vertices */
         uint32_t num_vertices;
@@ -140,6 +147,19 @@ bool RayMapFormat::loadMap(const QString &filename, MapData &mapData,
             int childId;
             in.readRawData(reinterpret_cast<char*>(&childId), sizeof(int));
             sector.child_sector_ids.append(childId);
+        }
+        
+        // Skip slope data (v11+) - Feature Removed
+        if (version >= 11) {
+            int16_t dummy16;
+            int8_t dummy8;
+            float dummyFloat;
+            in.readRawData(reinterpret_cast<char*>(&dummy16), sizeof(int16_t));
+            in.readRawData(reinterpret_cast<char*>(&dummy16), sizeof(int16_t));
+            in.readRawData(reinterpret_cast<char*>(&dummy8), sizeof(int8_t));
+            in.readRawData(reinterpret_cast<char*>(&dummy8), sizeof(int8_t));
+            in.readRawData(reinterpret_cast<char*>(&dummyFloat), sizeof(float));
+            in.readRawData(reinterpret_cast<char*>(&dummyFloat), sizeof(float));
         }
         
         mapData.sectors.append(sector);
@@ -275,7 +295,7 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
     }
     // --------------------------------------------
     
-    uint32_t version = 10;  // Updated to v10 for decals
+    uint32_t version = 11;  // Updated to v11 for slopes
     uint32_t num_sectors = mapData.sectors.size();
     uint32_t num_portals = mapData.portals.size();
     uint32_t num_sprites = mapData.sprites.size();
@@ -316,6 +336,7 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
         out.writeRawData(reinterpret_cast<const char*>(&sector.floor_texture_id), sizeof(int));
         out.writeRawData(reinterpret_cast<const char*>(&sector.ceiling_texture_id), sizeof(int));
         out.writeRawData(reinterpret_cast<const char*>(&sector.light_level), sizeof(int));
+        out.writeRawData(reinterpret_cast<const char*>(&sector.group_id), sizeof(int));
         
         /* Write vertices */
         uint32_t num_vertices = sector.vertices.size();
@@ -357,12 +378,29 @@ bool RayMapFormat::saveMap(const QString &filename, const MapData &mapData,
         }
         
         // Save hierarchy (parent and children)
+        qDebug() << "Saving sector" << sector.sector_id << "parent_sector_id=" << sector.parent_sector_id << "numChildren=" << sector.child_sector_ids.size();
         out.writeRawData(reinterpret_cast<const char*>(&sector.parent_sector_id), sizeof(int));
         int numChildren = sector.child_sector_ids.size();
         out.writeRawData(reinterpret_cast<const char*>(&numChildren), sizeof(int));
         for (int childId : sector.child_sector_ids) {
             out.writeRawData(reinterpret_cast<const char*>(&childId), sizeof(int));
         }
+        
+        // Save slope data (v11+)
+        // Write slope data (v11+)
+        // Save slope data (v11+) - WRITING ZEROS (Feature Removed)
+        int16_t floor_h = 0;
+        int16_t ceil_h = 0;
+        int8_t floor_en = 0;
+        int8_t ceil_en = 0;
+        float dummy = 0.0f;
+        
+        out.writeRawData(reinterpret_cast<const char*>(&floor_h), sizeof(int16_t));
+        out.writeRawData(reinterpret_cast<const char*>(&ceil_h), sizeof(int16_t));
+        out.writeRawData(reinterpret_cast<const char*>(&floor_en), sizeof(int8_t));
+        out.writeRawData(reinterpret_cast<const char*>(&ceil_en), sizeof(int8_t));
+        out.writeRawData(reinterpret_cast<const char*>(&dummy), sizeof(float)); // ref_x padding
+        out.writeRawData(reinterpret_cast<const char*>(&dummy), sizeof(float)); // ref_y padding
     }
     
     if (progressCallback) progressCallback("Guardando portales...");

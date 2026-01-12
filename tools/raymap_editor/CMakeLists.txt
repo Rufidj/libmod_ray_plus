@@ -68,6 +68,18 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         raycastrenderer.cpp
         insertboxdialog.h
         insertboxdialog.cpp
+        meshgeneratordialog.h
+        meshgeneratordialog.cpp
+        rampgenerator.h
+        rampgenerator.cpp
+        rampgeneratordialog.h
+        rampgeneratordialog.cpp
+        md3generator.h
+        md3generator.cpp
+        modelpreviewwidget.h
+        modelpreviewwidget.cpp
+        textureatlasgen.h
+        textureatlasgen.cpp
     )
 else()
     add_executable(raymap_editor
@@ -110,6 +122,18 @@ else()
         raycastrenderer.cpp
         insertboxdialog.h
         insertboxdialog.cpp
+        meshgeneratordialog.h
+        meshgeneratordialog.cpp
+        rampgenerator.h
+        rampgenerator.cpp
+        rampgeneratordialog.h
+        rampgeneratordialog.cpp
+        md3generator.h
+        md3generator.cpp
+        modelpreviewwidget.h
+        modelpreviewwidget.cpp
+        textureatlasgen.h
+        textureatlasgen.cpp
     )
 endif()
 

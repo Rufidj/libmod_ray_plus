@@ -13,6 +13,10 @@
 #include "fpgeditor.h"
 #include "effectgeneratordialog.h"
 #include "camerapatheditor.h"
+#include "meshgeneratordialog.h"
+#include "textureatlasgen.h"
+#include "md3generator.h"
+// #include "rampgeneratordialog.h" // REMOVED
 #include <QToolBar>
 #include <QStatusBar>
 #include <QFileDialog>
@@ -211,6 +215,16 @@ void MainWindow::createMenus()
     cameraPathAction->setShortcut(QKeySequence(tr("Ctrl+Shift+C")));
     connect(cameraPathAction, &QAction::triggered, this, &MainWindow::onOpenCameraPathEditor);
     toolsMenu->addAction(cameraPathAction);
+    
+    // Ramp Generator
+    // Ramp Generator REMOVED (Pivoting to MD3)
+    // ...
+    // QAction *rampGenAction = ...
+    
+    QAction *meshGenAction = new QAction(tr("Generador de Modelos MD3..."), this);
+    meshGenAction->setShortcut(QKeySequence(tr("Ctrl+Shift+M")));
+    connect(meshGenAction, &QAction::triggered, this, &MainWindow::onOpenMeshGenerator);
+    toolsMenu->addAction(meshGenAction);
     
     // Future tools (disabled for now)
     m_insertDoorAction = new QAction(QIcon::fromTheme("door-open"), tr("Puerta (Próximamente)"), this);
@@ -508,15 +522,20 @@ void MainWindow::createDockWindows()
     m_wallDock->setWidget(wallWidget);
     addDockWidget(Qt::RightDockWidgetArea, m_wallDock);
     
-    // Sector List Dock (NEW - on the left)
-    m_sectorListDock = new QDockWidget(tr("Lista de Sectores"), this);
-    m_sectorListWidget = new QListWidget();
-    m_sectorListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_sectorListWidget, &QListWidget::itemClicked,
-            this, &MainWindow::onSectorListItemClicked);
-    connect(m_sectorListWidget, &QListWidget::customContextMenuRequested,
-            this, &MainWindow::onSectorListContextMenu);
-    m_sectorListDock->setWidget(m_sectorListWidget);
+    // Sector tree dock (hierarchical with groups)
+    m_sectorListDock = new QDockWidget(tr("Sectores"), this);
+    m_sectorListDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    
+    m_sectorTree = new QTreeWidget();
+    m_sectorTree->setHeaderLabel(tr("Sectores"));
+    m_sectorTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_sectorTree, &QTreeWidget::itemClicked,
+            this, &MainWindow::onSectorTreeItemClicked);
+    connect(m_sectorTree, &QTreeWidget::itemDoubleClicked,
+            this, &MainWindow::onSectorTreeItemDoubleClicked);
+    connect(m_sectorTree, &QTreeWidget::customContextMenuRequested,
+            this, &MainWindow::onSectorTreeContextMenu);
+    m_sectorListDock->setWidget(m_sectorTree);
     addDockWidget(Qt::LeftDockWidgetArea, m_sectorListDock);
     
     /* DECAL DOCK DISABLED - Replaced by FPG Editor
@@ -626,7 +645,7 @@ void MainWindow::onNewMap()
     updateWindowTitle();
     
     // Clear sector list UI
-    m_sectorListWidget->clear();
+    // m_sectorListWidget->clear(); // Now using m_sectorTree
     
     // Sync UI
     m_skyboxSpin->blockSignals(true);
@@ -1039,18 +1058,21 @@ void MainWindow::onSectorSelected(int sectorId)
     updateSectorPanel();
     
     // Sync list selection
-    if (m_sectorListWidget) {
-        m_sectorListWidget->blockSignals(true); // Prevent loop
-        for (int i = 0; i < m_sectorListWidget->count(); i++) {
-            QListWidgetItem *item = m_sectorListWidget->item(i);
-            if (item->data(Qt::UserRole).toInt() == sectorId) {
-                item->setSelected(true);
-                m_sectorListWidget->scrollToItem(item);
-            } else {
-                item->setSelected(false);
+    if (m_sectorTree) {
+        m_sectorTree->blockSignals(true); // Prevent loop
+        
+        // Find and select the item in the tree
+        QTreeWidgetItemIterator it(m_sectorTree);
+        while (*it) {
+            if ((*it)->data(0, Qt::UserRole).toInt() == sectorId) {
+                m_sectorTree->setCurrentItem(*it);
+                m_sectorTree->scrollToItem(*it);
+                break;
             }
+            ++it;
         }
-        m_sectorListWidget->blockSignals(false);
+        
+        m_sectorTree->blockSignals(false);
     }
 }
 
@@ -1769,77 +1791,203 @@ void MainWindow::updateWallPanel()
 
 void MainWindow::updateSectorList()
 {
-    if (!m_sectorListWidget) return;
+    if (!m_sectorTree) return;
     
-    m_sectorListWidget->clear();
+    m_sectorTree->clear();
     
-    for (const Sector &sector : m_mapData.sectors) {
-        QString itemText;
-        
-        // Indent based on nesting level - REMOVED (v9 is flat)
-        // for (int i = 0; i < sector.nesting_level; i++) {
-        //     itemText += "  ";
-        // }
-        
-        itemText += QString("Sector %1").arg(sector.sector_id);
-        
-        // Removed sector type suffix (v9 is flat)
-        
-        QListWidgetItem *item = new QListWidgetItem(itemText);
-        item->setData(Qt::UserRole, sector.sector_id);
-        m_sectorListWidget->addItem(item);
+    // Create set of grouped sectors
+    QSet<int> groupedSectors;
+    for (const SectorGroup &group : m_mapData.sectorGroups) {
+        for (int id : group.sector_ids) {
+            groupedSectors.insert(id);
+        }
     }
-}
-
-void MainWindow::onSectorListItemClicked(QListWidgetItem *item)
-{
-    if (!item) return;
     
-    int sectorId = item->data(Qt::UserRole).toInt();
+    // Add groups as parent nodes
+    for (const SectorGroup &group : m_mapData.sectorGroups) {
+        QTreeWidgetItem *groupItem = new QTreeWidgetItem(m_sectorTree);
+        groupItem->setText(0, QString("📁 %1 (%2 sectores)")
+                          .arg(group.name)
+                          .arg(group.sector_ids.size()));
+        groupItem->setData(0, Qt::UserRole, -group.group_id - 1); // Negative = group
+        groupItem->setFlags(groupItem->flags() | Qt::ItemIsEditable);
+        groupItem->setExpanded(true); // Expand by default
+        
+        // Add child sectors
+        for (int sectorId : group.sector_ids) {
+            const Sector *sector = m_mapData.findSector(sectorId);
+            if (sector) {
+                QTreeWidgetItem *sectorItem = new QTreeWidgetItem(groupItem);
+                sectorItem->setText(0, QString("  Sector %1").arg(sectorId));
+                sectorItem->setData(0, Qt::UserRole, sectorId);
+            }
+        }
+    }
     
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        if (m_mapData.sectors[i].sector_id == sectorId) {
-            m_selectedSectorId = sectorId;
-            m_gridEditor->setSelectedSector(i);
-            updateSectorPanel();
-            break;
+    // Add ungrouped sectors
+    for (const Sector &sector : m_mapData.sectors) {
+        if (!groupedSectors.contains(sector.sector_id)) {
+            QTreeWidgetItem *item = new QTreeWidgetItem(m_sectorTree);
+            item->setText(0, QString("Sector %1").arg(sector.sector_id));
+            item->setData(0, Qt::UserRole, sector.sector_id);
         }
     }
 }
+
+void MainWindow::onSectorTreeItemClicked(QTreeWidgetItem *item, int column)
+{
+    Q_UNUSED(column);
+    if (!item) return;
+    
+    int data = item->data(0, Qt::UserRole).toInt();
+    
+    // Negative values are groups, positive are sector IDs
+    if (data >= 0) {
+        // It's a sector
+        int sectorId = data;
+        m_gridEditor->setSelectedSector(sectorId);
+        onSectorSelected(sectorId);
+    }
+}
+
+void MainWindow::onSectorTreeItemDoubleClicked(QTreeWidgetItem *item, int column)
+{
+    Q_UNUSED(column);
+    if (!item) return;
+    
+    int data = item->data(0, Qt::UserRole).toInt();
+    
+    if (data < 0) {
+        // It's a group - toggle expand/collapse
+        item->setExpanded(!item->isExpanded());
+    }
+}
+
+
 
 /* ============================================================================
    SECTOR CONTEXT MENU & OPERATIONS
    ============================================================================ */
 
-void MainWindow::onSectorListContextMenu(const QPoint &pos)
+void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
 {
-    QListWidgetItem *item = m_sectorListWidget->itemAt(pos);
+    QTreeWidgetItem *item = m_sectorTree->itemAt(pos);
     if (!item) return;
     
-    int sectorId = item->data(Qt::UserRole).toInt();
-    m_selectedSectorId = sectorId; // Ensure selection matches click
+    QMenu menu;
+    int data = item->data(0, Qt::UserRole).toInt();
     
-    QMenu menu(this);
-    
-    QAction *moveAction = menu.addAction(tr("Mover Sector..."));
-    connect(moveAction, &QAction::triggered, this, &MainWindow::moveSelectedSector);
-    
-    menu.addSeparator();
-    
-    QAction *copyAction = menu.addAction(tr("Copiar"));
-    connect(copyAction, &QAction::triggered, this, &MainWindow::copySelectedSector);
-    
-    QAction *pasteAction = menu.addAction(tr("Pegar"));
-    pasteAction->setEnabled(m_hasClipboard);
-    connect(pasteAction, &QAction::triggered, this, &MainWindow::pasteSector);
-    
-    menu.addSeparator();
-    
-    QAction *deleteAction = menu.addAction(tr("Eliminar"));
-    connect(deleteAction, &QAction::triggered, this, &MainWindow::deleteSelectedSector);
-    
-    menu.exec(m_sectorListWidget->mapToGlobal(pos));
+    if (data < 0) {
+        // It's a group
+        int groupId = -data - 1;
+        
+        QAction *renameAction = menu.addAction(tr("Renombrar grupo"));
+        QAction *setParentAction = menu.addAction(tr("Establecer sector padre"));
+        QAction *moveAction = menu.addAction(tr("Mover grupo"));
+        menu.addSeparator();
+        QAction *deleteAction = menu.addAction(tr("Eliminar grupo (mantener sectores)"));
+        
+        QAction *selected = menu.exec(m_sectorTree->mapToGlobal(pos));
+        
+        if (selected == renameAction) {
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+            m_sectorTree->editItem(item, 0);
+        } else if (selected == setParentAction) {
+            // Show dialog to select parent sector
+            QStringList sectorNames;
+            QList<int> sectorIds;
+            
+            for (const Sector &sector : m_mapData.sectors) {
+                // Only ungrouped sectors can be parents for now
+                // A sector is ungrouped if its group_id is -1 (or not part of any group in m_mapData.sectorGroups)
+                bool isUngrouped = true;
+                for (const SectorGroup &group : m_mapData.sectorGroups) {
+                    if (group.sector_ids.contains(sector.sector_id)) {
+                        isUngrouped = false;
+                        break;
+                    }
+                }
+
+                if (isUngrouped) {
+                    sectorNames.append(QString("Sector %1").arg(sector.sector_id));
+                    sectorIds.append(sector.sector_id);
+                }
+            }
+            
+            if (sectorNames.isEmpty()) {
+                QMessageBox::information(this, tr("Sin sectores"),
+                                       tr("No hay sectores disponibles para ser padres.\n"
+                                          "Solo los sectores no agrupados pueden ser padres."));
+                return;
+            }
+            
+            bool ok;
+            QString selectedName = QInputDialog::getItem(this, tr("Seleccionar sector padre"),
+                                                        tr("Sector padre:"), sectorNames, 0, false, &ok);
+            if (ok) {
+                int idx = sectorNames.indexOf(selectedName);
+                int parentId = sectorIds[idx];
+                
+                qDebug() << "Assigning parent sector" << parentId << "to group" << groupId;
+                
+                // Set parent for all sectors in group
+                SectorGroup *group = m_mapData.findGroup(groupId);
+                if (group) {
+                    qDebug() << "Found group with" << group->sector_ids.size() << "sectors";
+                    for (int sectorId : group->sector_ids) {
+                        Sector *sector = m_mapData.findSector(sectorId);
+                        if (sector) {
+                            sector->parent_sector_id = parentId;
+                            qDebug() << "  Set sector" << sectorId << "parent_sector_id =" << parentId;
+                        }
+                    }
+                    m_statusLabel->setText(tr("Sector padre asignado al grupo '%1'").arg(group->name));
+                    m_gridEditor->update();
+                } else {
+                    qDebug() << "ERROR: Group" << groupId << "not found!";
+                }
+            }
+        } else if (selected == moveAction) {
+            QMessageBox::information(this, tr("Mover Grupo"),
+                tr("Haz clic y arrastra en el mapa para mover todo el grupo.\n"
+                   "Presiona ESC para cancelar."));
+            m_gridEditor->setGroupMoveMode(groupId);
+        } else if (selected == deleteAction) {
+            // Remove group but keep sectors
+            for (int i = 0; i < m_mapData.sectorGroups.size(); i++) {
+                if (m_mapData.sectorGroups[i].group_id == groupId) {
+                    m_mapData.sectorGroups.removeAt(i);
+                    updateSectorList();
+                    break;
+                }
+            }
+        }
+    } else {
+        // It's a sector
+        int sectorId = data;
+        menu.addAction(tr("Eliminar sector"), this, [this, sectorId]() {
+            // Find and remove sector
+            for (int i = 0; i < m_mapData.sectors.size(); i++) {
+                if (m_mapData.sectors[i].sector_id == sectorId) {
+                    m_mapData.sectors.removeAt(i);
+                    
+                    // Remove from any groups
+                    for (SectorGroup &group : m_mapData.sectorGroups) {
+                        group.sector_ids.removeAll(sectorId);
+                    }
+                    
+                    updateSectorList();
+                    m_gridEditor->update();
+                }
+            }
+        }); // Closing brace for the lambda
+    }
+    menu.exec(m_sectorTree->mapToGlobal(pos));
 }
+
+/* ============================================================================
+   SECTOR OPERATIONS
+   ============================================================================ */
 
 void MainWindow::deleteSelectedSector()
 {
@@ -1852,17 +2000,17 @@ void MainWindow::deleteSelectedSector()
         
     if (reply != QMessageBox::Yes) return;
     
-    // Find sector index
-    int index = -1;
+    // Find sector sectorIndex
+    int sectorIndex = -1;
     for (int i = 0; i < m_mapData.sectors.size(); i++) {
         if (m_mapData.sectors[i].sector_id == m_selectedSectorId) {
-            index = i;
+            sectorIndex = i;
             break;
         }
     }
     
-    if (index >= 0) {
-        m_mapData.sectors.removeAt(index);
+    if (sectorIndex >= 0) {
+        m_mapData.sectors.removeAt(sectorIndex);
         m_selectedSectorId = -1;
         updateSectorList();
         m_gridEditor->update();
@@ -2324,15 +2472,22 @@ void MainWindow::onInsertStairs()
 
 void MainWindow::onSetParentSector()
 {
-    if (m_sectorListWidget->selectedItems().isEmpty()) {
-        QMessageBox::warning(this, tr("Asignar Sector Padre"),
-                           tr("Por favor, selecciona un sector primero."));
+    // Get currently selected item from tree
+    QTreeWidgetItem *selectedItem = m_sectorTree->currentItem();
+    if (!selectedItem) {
+        QMessageBox::warning(this, tr("Sin selección"),
+                           tr("Por favor selecciona un sector de la lista."));
         return;
     }
     
-    // Use selectedItems()[0] instead of currentItem() because currentItem() can be NULL
-    QListWidgetItem *selectedItem = m_sectorListWidget->selectedItems()[0];
-    int selectedSectorId = selectedItem->data(Qt::UserRole).toInt();
+    int data = selectedItem->data(0, Qt::UserRole).toInt();
+    if (data < 0) {
+        QMessageBox::warning(this, tr("Selección inválida"),
+                           tr("Por favor selecciona un sector, no un grupo."));
+        return;
+    }
+    
+    int selectedSectorId = data;
     
     int selectedIndex = -1;
     for (int i = 0; i < m_mapData.sectors.size(); i++) {
@@ -2757,3 +2912,82 @@ void MainWindow::onOpenCameraPathEditor()
     editor->exec();
     delete editor;
 }
+
+void MainWindow::onOpenMeshGenerator()
+{
+    MeshGeneratorDialog dlg(this);
+    if (dlg.exec() == QDialog::Accepted) {
+        MeshGeneratorDialog::MeshParams params = dlg.getParameters();
+        
+        qDebug() << "=== MD3 Export Debug ===";
+        qDebug() << "Texture paths count:" << params.texturePaths.size();
+        for (int i = 0; i < params.texturePaths.size(); i++) {
+            qDebug() << "  Texture" << i << ":" << params.texturePaths[i];
+        }
+        
+        bool success = false;
+        
+        // Check if we have multiple textures - use atlas generation
+        if (params.texturePaths.size() > 1) {
+            qDebug() << "Using multi-texture atlas generation";
+            
+            // Generate mesh with multi-texture UVs
+            MD3Generator::MeshData mesh = MD3Generator::generateMesh(
+                (MD3Generator::MeshType)params.type,
+                params.width, params.height, params.depth, params.segments,
+                params.hasRailings, params.hasArch, (int)params.roofType
+            );
+            
+            qDebug() << "Mesh generated with" << mesh.vertices.size() << "vertices";
+            
+            // Generate texture atlas
+            QVector<QImage> textures = TextureAtlasGenerator::loadTextures(params.texturePaths);
+            qDebug() << "Loaded" << textures.size() << "textures for atlas";
+            
+            if (!textures.isEmpty()) {
+                QVector<TextureAtlasGenerator::AtlasRegion> uvRegions;
+                QImage atlas = TextureAtlasGenerator::createAtlas(textures, uvRegions);
+                
+                qDebug() << "Atlas created:" << atlas.width() << "x" << atlas.height();
+                
+                // Save atlas as the main texture (same name as MD3 but .png)
+                QFileInfo fi(params.exportPath);
+                QString texturePath = fi.absolutePath() + "/" + fi.baseName() + ".png";
+                
+                qDebug() << "Attempting to save atlas to:" << texturePath;
+                
+                if (atlas.save(texturePath)) {
+                    qDebug() << "✓ Atlas texture saved successfully";
+                    // Save MD3
+                    success = MD3Generator::saveMD3(mesh, params.exportPath);
+                    qDebug() << "MD3 save result:" << success;
+                } else {
+                    qWarning() << "✗ Failed to save atlas texture to:" << texturePath;
+                    success = false;
+                }
+            } else {
+                qWarning() << "✗ Failed to load textures for atlas generation";
+                success = false;
+            }
+        } else {
+            qDebug() << "Using single texture export";
+            // Single texture - use original method
+            success = MD3Generator::generateAndSave(
+                (MD3Generator::MeshType)params.type,
+                params.width, params.height, params.depth, params.segments,
+                params.texturePath, params.exportPath
+            );
+        }
+        
+        if (success) {
+            QMessageBox::information(this, "Generador MD3", 
+                                     QString("Modelo exportado correctamente a:\n%1").arg(params.exportPath));
+        } else {
+             QMessageBox::warning(this, "Generador MD3", 
+                                  QString("Error al exportar modelo. Verifique la ruta y permisos."));
+        }
+    }
+}
+
+// void MainWindow::onGenerateRamp() ... REMOVED logic or commented out
+// Function body removed

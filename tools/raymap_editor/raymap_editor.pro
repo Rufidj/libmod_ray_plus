@@ -22,7 +22,10 @@ HEADERS += \
     cameramarker.h \
     raymapformat.h \
     mapdata.h \
-    insertboxdialog.h
+    insertboxdialog.h \
+    meshgeneratordialog.h \
+    md3generator.h \
+    modelpreviewwidget.h
 
 # Archivos fuente
 SOURCES += \
@@ -35,7 +38,10 @@ SOURCES += \
     spriteeditor.cpp \
     cameramarker.cpp \
     raymapformat.cpp \
-    insertboxdialog.cpp
+    insertboxdialog.cpp \
+    meshgeneratordialog.cpp \
+    md3generator.cpp \
+    modelpreviewwidget.cpp
 
 # Archivos UI
 FORMS += \

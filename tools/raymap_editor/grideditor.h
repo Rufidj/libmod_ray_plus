@@ -49,6 +49,10 @@ public:
     void setCameraPosition(float x, float y);
     void getCameraPosition(float &x, float &y) const;
     bool hasCameraPosition() const { return m_hasCameraPosition; }
+
+    // Group movement
+    void setGroupMoveMode(int groupId);  // NEW: Enable group movement mode
+    void cancelGroupMove();              // NEW: Cancel group movement
     
 signals:
     void sectorSelected(int sectorId);
@@ -67,8 +71,9 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
-    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override; // NEW
     
 private:
@@ -111,8 +116,15 @@ private:
     void drawCamera(QPainter &painter);
     void drawCurrentPolygon(QPainter &painter);
     void drawCursorInfo(QPainter &painter);
+    bool m_manualPortalMode;
     
-    // Coordinate conversion
+    // Group movement
+    bool m_isMovingGroup;
+    int m_movingGroupId;
+    QPointF m_groupMoveStart;
+    QMap<int, QVector<QPointF>> m_originalGroupPositions; // sectorId -> original vertices
+    
+    // Helper functions
     QPointF screenToWorld(const QPoint &screenPos) const;
     QPoint worldToScreen(const QPointF &worldPos) const;
     

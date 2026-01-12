@@ -54,22 +54,27 @@ struct Sector {
     /* Geometría del polígono (máx 16 vértices) */
     QVector<QPointF> vertices;
     
+    /* Paredes */
+    QVector<Wall> walls;
+    
     /* Alturas */
     float floor_z;
     float ceiling_z;
+    
+    /* Slopes - REMOVED (Replaced by MD3 Models) */
+    // Pivot is implicitly wall[0]
     
     /* Texturas */
     int floor_texture_id;
     int ceiling_texture_id;
     
-    /* Paredes */
-    QVector<Wall> walls;
+    /* Iluminación */
+    int light_level;
     
     /* Portales (IDs) */
     QVector<int> portal_ids;
     
-    /* Iluminación */
-    int light_level;
+    int group_id;  // NEW: ID of the group this sector belongs to (-1 if ungrouped)
     
     /* Jerarquía de sectores anidados */
     int parent_sector_id;              // -1 = root, >=0 = parent sector ID
@@ -82,7 +87,7 @@ struct Sector {
     /* Constructor */
     Sector() : sector_id(0), floor_z(0.0f), ceiling_z(256.0f),
                floor_texture_id(0), ceiling_texture_id(0), light_level(255),
-               parent_sector_id(-1) {}
+               group_id(-1), parent_sector_id(-1) {}
 };
 
 
@@ -167,6 +172,18 @@ struct CameraData {
 };
 
 /* ============================================================================
+   SECTOR GROUP - Agrupación de sectores relacionados
+   ============================================================================ */
+
+struct SectorGroup {
+    int group_id;
+    QString name;
+    QVector<int> sector_ids;  // IDs de sectores en este grupo
+    
+    SectorGroup() : group_id(-1), name("Grupo") {}
+};
+
+/* ============================================================================
    MAP DATA - Estructura principal del mapa
    ============================================================================ */
 
@@ -183,6 +200,9 @@ struct MapData {
     
     /* Decals */
     QVector<Decal> decals;
+    
+    /* Sector Groups */
+    QVector<SectorGroup> sectorGroups;
     
     /* Cámara */
     CameraData camera;
@@ -202,6 +222,55 @@ struct MapData {
             if (s.sector_id > maxId) maxId = s.sector_id;
         }
         return maxId + 1;
+    }
+    
+    /* Helper: Get next group ID */
+    int getNextGroupId() const {
+        int maxId = -1;
+        for (const SectorGroup &g : sectorGroups) {
+            if (g.group_id > maxId) maxId = g.group_id;
+        }
+        return maxId + 1;
+    }
+    
+    /* Helper: Find sector by ID */
+    Sector* findSector(int sectorId) {
+        for (Sector &s : sectors) {
+            if (s.sector_id == sectorId) return &s;
+        }
+        return nullptr;
+    }
+    
+    const Sector* findSector(int sectorId) const {
+        for (const Sector &s : sectors) {
+            if (s.sector_id == sectorId) return &s;
+        }
+        return nullptr;
+    }
+    
+    /* Helper: Find group by ID */
+    SectorGroup* findGroup(int groupId) {
+        for (SectorGroup &g : sectorGroups) {
+            if (g.group_id == groupId) return &g;
+        }
+        return nullptr;
+    }
+    
+    const SectorGroup* findGroup(int groupId) const {
+        for (const SectorGroup &g : sectorGroups) {
+            if (g.group_id == groupId) return &g;
+        }
+        return nullptr;
+    }
+    
+    /* Helper: Find which group contains a sector */
+    int findGroupForSector(int sectorId) const {
+        for (const SectorGroup &g : sectorGroups) {
+            if (g.sector_ids.contains(sectorId)) {
+                return g.group_id;
+            }
+        }
+        return -1;
     }
     
     /* Helper: Get next wall ID */
@@ -231,14 +300,6 @@ struct MapData {
             if (d.id > maxId) maxId = d.id;
         }
         return maxId + 1;
-    }
-    
-    /* Helper: Find sector by ID */
-    Sector* findSector(int sector_id) {
-        for (Sector &s : sectors) {
-            if (s.sector_id == sector_id) return &s;
-        }
-        return nullptr;
     }
     
     /* Helper: Find portal by ID */

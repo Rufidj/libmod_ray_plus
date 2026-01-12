@@ -13,11 +13,12 @@
 #include <QMenu>
 #include <QContextMenuEvent>
 #include <cmath>
+#include <cfloat>
 
 GridEditor::GridEditor(QWidget *parent)
     : QWidget(parent)
     , m_mapData(nullptr)
-    , m_editMode(MODE_DRAW_SECTOR)
+    , m_editMode(MODE_SELECT_SECTOR)
     , m_selectedTexture(1)
     , m_selectedSector(-1)
     , m_selectedWall(-1)
@@ -30,8 +31,11 @@ GridEditor::GridEditor(QWidget *parent)
     , m_isDraggingSector(false)
     , m_draggedVertex(-1)
     , m_hasCameraPosition(false)
-    , m_cameraX(384.0f)
-    , m_cameraY(384.0f)
+    , m_cameraX(0.0f)
+    , m_cameraY(0.0f)
+    , m_manualPortalMode(false)
+    , m_isMovingGroup(false)
+    , m_movingGroupId(-1)
 {
     setMinimumSize(800, 600);
     setMouseTracking(true);
@@ -374,6 +378,42 @@ void GridEditor::paintEvent(QPaintEvent *event)
         drawCurrentPolygon(painter);
     }
     
+    // Draw group selection highlight
+    if (m_isMovingGroup && m_movingGroupId >= 0) {
+        const SectorGroup *group = m_mapData->findGroup(m_movingGroupId);
+        if (group) {
+            // Calculate bounding box of all sectors in group
+            float minX = FLT_MAX, minY = FLT_MAX;
+            float maxX = -FLT_MAX, maxY = -FLT_MAX;
+            
+            for (int sectorId : group->sector_ids) {
+                const Sector *sector = m_mapData->findSector(sectorId);
+                if (sector) {
+                    for (const QPointF &v : sector->vertices) {
+                        minX = qMin(minX, (float)v.x());
+                        minY = qMin(minY, (float)v.y());
+                        maxX = qMax(maxX, (float)v.x());
+                        maxY = qMax(maxY, (float)v.y());
+                    }
+                }
+            }
+            
+            // Draw bounding rectangle
+            QPoint topLeft = worldToScreen(QPointF(minX, minY));
+            QPoint bottomRight = worldToScreen(QPointF(maxX, maxY));
+            QRect boundingRect(topLeft, bottomRight);
+            
+            painter.setPen(QPen(QColor(255, 200, 0), 3, Qt::DashLine));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(boundingRect);
+            
+            // Draw group name
+            painter.setPen(QPen(QColor(255, 255, 255), 1));
+            painter.setFont(QFont("Arial", 12, QFont::Bold));
+            painter.drawText(topLeft + QPoint(5, -5), group->name);
+        }
+    }
+    
     // Draw cursor coordinates
     drawCursorInfo(painter);
 }
@@ -440,7 +480,7 @@ void GridEditor::drawSectors(QPainter &painter)
         painter.setPen(Qt::NoPen);
         painter.drawPolygon(polygon);
         
-        // Draw sector ID
+        // Draw sector ID and Slope Info
         QPointF center(0, 0);
         for (const QPointF &v : sector.vertices) {
             center += v;
@@ -450,6 +490,8 @@ void GridEditor::drawSectors(QPainter &painter)
         
         painter.setPen(QPen(QColor(200, 200, 200), 1));
         painter.drawText(screenCenter, QString("S%1").arg(sector.sector_id));
+        
+        // SLOPE INDICATOR REMOVED
     }
 }
 
@@ -597,6 +639,12 @@ void GridEditor::mousePressEvent(QMouseEvent *event)
         return;
     }
     
+    // Handle group movement mode
+    if (m_isMovingGroup && event->button() == Qt::LeftButton) {
+        m_groupMoveStart = worldPos;
+        return;
+    }
+    
     if (event->button() == Qt::LeftButton) {
         switch (m_editMode) {
             case MODE_DRAW_SECTOR:
@@ -628,6 +676,21 @@ void GridEditor::mousePressEvent(QMouseEvent *event)
                     // No wall found - check if clicked inside a sector
                     int sectorIdx = findSectorAt(worldPos);
                     if (sectorIdx >= 0) {
+                        // Check if this sector belongs to a group
+                        int sectorId = m_mapData->sectors[sectorIdx].sector_id;
+                        int groupId = m_mapData->findGroupForSector(sectorId);
+                        
+                        if (groupId >= 0) {
+                            // Sector belongs to a group - auto-select group for movement
+                            setGroupMoveMode(groupId);
+                            m_groupMoveStart = worldPos;
+                            QMessageBox::information(this, tr("Grupo Seleccionado"),
+                                tr("Grupo seleccionado. Arrastra para mover todos los sectores del grupo.\n"
+                                   "Presiona ESC para cancelar."));
+                            update();
+                            return;
+                        }
+                        
                         // Check if we are clicking inside the ALREADY SELECTED sector
                         if (sectorIdx == m_selectedSector) {
                             // Start Dragging Sector
@@ -776,6 +839,44 @@ void GridEditor::mouseMoveEvent(QMouseEvent *event)
     
     QPointF worldPos = screenToWorld(event->pos());
     
+    // Handle Group Movement
+    if (m_isMovingGroup && (event->buttons() & Qt::LeftButton) && m_movingGroupId >= 0 && m_mapData) {
+        // Calculate total offset from the start position
+        QPointF totalOffset = worldPos - m_groupMoveStart;
+        
+        // Find the group
+        const SectorGroup *group = m_mapData->findGroup(m_movingGroupId);
+        if (group) {
+            // Move all sectors in the group
+            for (int sectorId : group->sector_ids) {
+                Sector *sector = m_mapData->findSector(sectorId);
+                if (sector && m_originalGroupPositions.contains(sectorId)) {
+                    const QVector<QPointF> &originalVertices = m_originalGroupPositions[sectorId];
+                    
+                    // Update vertices from original positions + total offset
+                    for (int i = 0; i < sector->vertices.size() && i < originalVertices.size(); i++) {
+                        sector->vertices[i] = originalVertices[i] + totalOffset;
+                    }
+                    
+                    // Update walls from vertices
+                    for (int w = 0; w < sector->walls.size(); w++) {
+                        int v1 = w;
+                        int v2 = (w + 1) % sector->vertices.size();
+                        if (v1 < sector->vertices.size() && v2 < sector->vertices.size()) {
+                            sector->walls[w].x1 = sector->vertices[v1].x();
+                            sector->walls[w].y1 = sector->vertices[v1].y();
+                            sector->walls[w].x2 = sector->vertices[v2].x();
+                            sector->walls[w].y2 = sector->vertices[v2].y();
+                        }
+                    }
+                }
+            }
+        }
+        
+        update();
+        return;
+    }
+    
     // Handle Sector Dragging
     if (m_isDraggingSector && m_selectedSector >= 0 && m_selectedSector < m_mapData->sectors.size()) {
         float dx = worldPos.x() - m_dragStartPos.x();
@@ -848,12 +949,22 @@ void GridEditor::mouseReleaseEvent(QMouseEvent *event)
     }
 }
 
-void GridEditor::wheelEvent(QWheelEvent *event)
+void GridEditor::keyPressEvent(QKeyEvent *event)
 {
-    float delta = event->angleDelta().y() > 0 ? 1.1f : 0.9f;
-    setZoom(m_zoom * delta);
+    // ESC to cancel group movement
+    if (event->key() == Qt::Key_Escape) {
+        if (m_isMovingGroup) {
+            cancelGroupMove();
+            QMessageBox::information(this, tr("Cancelado"),
+                                   tr("Movimiento de grupo cancelado."));
+            return;
+        }
+    }
+    
+    // Slope Editing Keys REMOVED
+    
+    QWidget::keyPressEvent(event);
 }
-
 
 
 void GridEditor::contextMenuEvent(QContextMenuEvent *event)
@@ -895,6 +1006,14 @@ void GridEditor::contextMenuEvent(QContextMenuEvent *event)
             }
         }
     }
+}
+
+void GridEditor::wheelEvent(QWheelEvent *event)
+{
+    // Zoom with mouse wheel
+    float delta = event->angleDelta().y() / 120.0f;
+    float newZoom = m_zoom * (1.0f + delta * 0.1f);
+    setZoom(newZoom);
 }
 
 void GridEditor::mouseDoubleClickEvent(QMouseEvent *event)
@@ -964,3 +1083,41 @@ void GridEditor::mouseDoubleClickEvent(QMouseEvent *event)
         }
     }
 }
+
+/* ============================================================================
+   GROUP MOVEMENT
+   ============================================================================ */
+
+void GridEditor::setGroupMoveMode(int groupId)
+{
+    m_isMovingGroup = true;
+    m_movingGroupId = groupId;
+    m_originalGroupPositions.clear();
+    
+    // Store original positions of all sectors in the group
+    if (m_mapData) {
+        const SectorGroup *group = m_mapData->findGroup(groupId);
+        if (group) {
+            for (int sectorId : group->sector_ids) {
+                const Sector *sector = m_mapData->findSector(sectorId);
+                if (sector) {
+                    m_originalGroupPositions[sectorId] = sector->vertices;
+                }
+            }
+        }
+    }
+    
+    setCursor(Qt::SizeAllCursor);
+    update();
+}
+
+void GridEditor::cancelGroupMove()
+{
+    m_isMovingGroup = false;
+    m_movingGroupId = -1;
+    m_originalGroupPositions.clear();
+    setCursor(Qt::ArrowCursor);
+    update();
+}
+
+
