@@ -14,7 +14,7 @@ find_package(ZLIB REQUIRED)
 
 # Buscar Qt5 o Qt6
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Network)
 
 # Buscar OpenGL
 find_package(OpenGL REQUIRED)
@@ -24,6 +24,20 @@ set(PROJECT_SOURCES
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
+    mainwindow_darkmode.cpp
+    mainwindow_build.cpp
+    mainwindow_project.cpp
+    newprojectdialog.h newprojectdialog.cpp
+    consolewidget.h consolewidget.cpp
+    assetbrowser.h assetbrowser.cpp
+    buildmanager.h buildmanager.cpp
+    bennugdinstaller.h bennugdinstaller.cpp
+    codegenerator.h codegenerator.cpp
+    processgenerator.h processgenerator.cpp
+    projectmanager.h projectmanager.cpp
+    codepreviewpanel.h codepreviewpanel.cpp
+    codeeditor.h codeeditor.cpp
+    codeeditordialog.h codeeditordialog.cpp
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -142,6 +156,7 @@ target_link_libraries(raymap_editor PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::OpenGL
     Qt${QT_VERSION_MAJOR}::OpenGLWidgets
+    Qt${QT_VERSION_MAJOR}::Network
     ${OPENGL_LIBRARIES}
     ZLIB::ZLIB
 )
