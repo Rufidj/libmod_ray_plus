@@ -74,8 +74,21 @@ void BuildManager::buildProject(const QString &projectPath)
     emit buildStarted();
     emit executeInTerminal("Compiling: " + mainFile + "\n");
     
-    m_process->setWorkingDirectory(projectPath);
-    m_process->start(m_bgdcPath, QStringList() << mainFile);
+    // Set LD_LIBRARY_PATH to help bgdc find modules
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QFileInfo bgdcInfo(m_bgdcPath);
+    QString bgdcDir = bgdcInfo.absolutePath();
+    QString currentLdPath = env.value("LD_LIBRARY_PATH");
+    if (!currentLdPath.isEmpty()) {
+        env.insert("LD_LIBRARY_PATH", bgdcDir + ":" + currentLdPath);
+    } else {
+        env.insert("LD_LIBRARY_PATH", bgdcDir);
+    }
+    m_process->setProcessEnvironment(env);
+    
+    // Set working directory to src folder so includes work correctly
+    m_process->setWorkingDirectory(projectPath + "/src");
+    m_process->start(m_bgdcPath, QStringList() << "main.prg");
     m_isrunning = true;
 }
 
@@ -93,8 +106,21 @@ void BuildManager::runProject(const QString &projectPath)
     emit runStarted();
     emit executeInTerminal("Running: " + dcbFile + "\n");
     
+    // Set LD_LIBRARY_PATH to help bgdi find modules
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QFileInfo bgdiInfo(m_bgdiPath);
+    QString bgdiDir = bgdiInfo.absolutePath();
+    QString currentLdPath = env.value("LD_LIBRARY_PATH");
+    if (!currentLdPath.isEmpty()) {
+        env.insert("LD_LIBRARY_PATH", bgdiDir + ":" + currentLdPath);
+    } else {
+        env.insert("LD_LIBRARY_PATH", bgdiDir);
+    }
+    m_process->setProcessEnvironment(env);
+    
+    // Working directory is project root, dcb is in src/
     m_process->setWorkingDirectory(projectPath);
-    m_process->start(m_bgdiPath, QStringList() << dcbFile);
+    m_process->start(m_bgdiPath, QStringList() << "src/main.dcb");
     m_isrunning = true;
 }
 
