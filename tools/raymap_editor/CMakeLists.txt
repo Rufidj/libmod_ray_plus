@@ -38,6 +38,10 @@ set(PROJECT_SOURCES
     codepreviewpanel.h codepreviewpanel.cpp
     codeeditor.h codeeditor.cpp
     codeeditordialog.h codeeditordialog.cpp
+    md3loader.h md3loader.cpp
+    entitypropertypanel.h entitypropertypanel.cpp
+    objtomd3converter.h objtomd3converter.cpp
+    objimportdialog.h objimportdialog.cpp
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
