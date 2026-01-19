@@ -39,7 +39,8 @@ public:
         MODE_SELECT_SECTOR,    // Select sector
         MODE_PLACE_DECAL_FLOOR,   // Place floor decal
         MODE_PLACE_DECAL_CEILING, // Place ceiling decal
-        MODE_MANUAL_PORTAL     // Link portals manually
+        MODE_MANUAL_PORTAL,       // Link portals manually
+        MODE_SELECT_ENTITY        // Select and move entities
     };
     void setEditMode(EditMode mode);
     
@@ -64,6 +65,9 @@ public:
     void setGroupMoveMode(int groupId);  // NEW: Enable group movement mode
     void cancelGroupMove();              // NEW: Cancel group movement
     
+    // Entity modification
+    void updateEntity(int index, const EntityInstance &entity);
+    
 signals:
     void statusMessage(const QString &msg); // NEW: Consolidated status signal
     void sectorSelected(int sectorId);
@@ -76,6 +80,10 @@ signals:
     void cameraPlaced(float x, float y);
     void spawnFlagPlaced(int flagId, float x, float y);
     void decalPlaced(float x, float y);
+    void entitySelected(int index, EntityInstance entity); // NEW
+    void entityMoved(int index, EntityInstance entity); // NEW: While dragging
+    
+
     
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -101,6 +109,9 @@ private:
     int m_selectedWall;  // wall_id (legacy)
     int m_selectedWallSector;  // Sector index of selected wall
     int m_selectedWallIndex;   // Wall index within sector
+    int m_selectedEntity; // NEW: Index of selected entity in m_mapData->entities
+    
+    // ... view transform ...
     
     // View transform
     float m_zoom;
@@ -109,6 +120,7 @@ private:
     // Drawing state
     bool m_isDrawing;
     bool m_isDraggingSector;            // NEW: Dragging whole sector
+    bool m_isDraggingEntity;            // NEW: Dragging entity
     bool m_isDraggingWall;              // Future expansion?
     QVector<QPointF> m_currentPolygon;  // For MODE_DRAW_SECTOR
     int m_draggedVertex;                // For MODE_EDIT_VERTICES
@@ -151,9 +163,9 @@ private:
     // Hit testing
     int findSectorAt(const QPointF &worldPos);
     int findWallAt(const QPointF &worldPos, float tolerance = 10.0f);
+    int findEntityAt(const QPointF &worldPos, float tolerance = 10.0f);
     int findVertexAt(const QPointF &worldPos, int &sectorId, float tolerance = 10.0f);
     int findSpawnFlagAt(const QPointF &worldPos, float tolerance = 10.0f);
-    int findEntityAt(const QPointF &worldPos, float tolerance = 10.0f); // NEW
     
     QString m_fileName;
     bool m_showGrid;

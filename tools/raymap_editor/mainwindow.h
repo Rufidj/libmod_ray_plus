@@ -22,6 +22,7 @@
 #include "textureselector.h"
 #include "visualmodewidget.h"
 #include "fpgeditor.h"
+#include "entitypropertypanel.h"
 
 class BuildManager;
 class ProjectManager;
@@ -138,6 +139,11 @@ private slots:
     // Sector tree (hierarchical)
     void onSectorTreeItemClicked(QTreeWidgetItem *item, int column);
     void onSectorTreeItemDoubleClicked(QTreeWidgetItem *item, int column);
+    
+    // Entity selection
+    void onEntitySelected(int index, EntityInstance entity); // NEW
+    void onEntityChanged(int index, EntityInstance entity); // NEW
+    
     void updateSectorList();  // Refresh the sector tree
     void onSectorTreeContextMenu(const QPoint &pos); // Context menu slot
     
@@ -172,6 +178,9 @@ private slots:
 
     // Dark Mode
     void onToggleDarkMode(bool checked);
+    
+    // Tools
+    void openObjConverter();
     void loadSettings();
     void saveSettings();
     
@@ -203,6 +212,11 @@ private:
 
     // Texture cache for selector
     QMap<int, QPixmap> m_textureCache;
+    
+    // Property panels
+    QWidget *m_sectorPanel;
+    QWidget *m_wallPanel;
+    EntityPropertyPanel *m_entityPanel; // NEW
     
     // Dock widgets
     QDockWidget *m_sectorDock;

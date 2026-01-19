@@ -34,6 +34,7 @@ GridEditor::GridEditor(QWidget *parent)
     , m_panY(0.0f)
     , m_isDrawing(false)
     , m_isDraggingSector(false)
+    , m_isDraggingEntity(false)
     , m_draggedVertex(-1)
     , m_hasCameraPosition(false)
     , m_cameraX(0.0f)
@@ -231,6 +232,8 @@ int GridEditor::findSectorAt(const QPointF &worldPos)
     
     return bestSector;
 }
+
+
 
 int GridEditor::findWallAt(const QPointF &worldPos, float tolerance)
 {
@@ -710,6 +713,15 @@ void GridEditor::mousePressEvent(QMouseEvent *event)
             }
                 
             case MODE_SELECT_WALL: {
+                // Check entities first
+                int entityIdx = findEntityAt(worldPos);
+                if (entityIdx >= 0) {
+                    m_selectedEntity = entityIdx;
+                    emit entitySelected(entityIdx, m_mapData->entities[entityIdx]);
+                    update();
+                    break;
+                }
+
                 int wallIdx = findWallAt(worldPos);
                 if (wallIdx >= 0 && m_selectedSector >= 0 && m_selectedSector < m_mapData->sectors.size()) {
                     // findWallAt sets m_selectedSector to the sector containing the wall
@@ -819,6 +831,24 @@ void GridEditor::mousePressEvent(QMouseEvent *event)
                     // Force update to show potential highlight if we add it later
                     update();
                 }
+                break;
+            }
+            
+            case MODE_SELECT_ENTITY: {
+                int entityIdx = findEntityAt(worldPos);
+                if (entityIdx >= 0) {
+                    m_selectedEntity = entityIdx;
+                    emit entitySelected(entityIdx, m_mapData->entities[entityIdx]);
+                    
+                    m_isDraggingEntity = true;
+                    m_dragStartPos = worldPos;
+                    setCursor(Qt::SizeAllCursor);
+                } else {
+                    m_selectedEntity = -1;
+                    EntityInstance empty; // Dummy for deselection
+                    emit entitySelected(-1, empty);
+                }
+                update();
                 break;
             }
                 
@@ -978,6 +1008,36 @@ void GridEditor::mouseMoveEvent(QMouseEvent *event)
             emit mapChanged();
         }
     }
+    
+    // Entity dragging
+    if (m_isDraggingEntity && m_selectedEntity >= 0 && m_selectedEntity < m_mapData->entities.size()) {
+        float dx = worldPos.x() - m_dragStartPos.x();
+        float dy = worldPos.y() - m_dragStartPos.y();
+        
+        EntityInstance &ent = m_mapData->entities[m_selectedEntity];
+        ent.x += dx;
+        ent.y += dy;
+        
+        m_dragStartPos = worldPos;
+        update();
+        // Emit updated entity to panel (and visual mode via MainWindow)
+        // We reuse entitySelected to update panel values, OR create a new signal if needed.
+        // But MainWindow::onEntityChanged handles updateEntity (which loops back here).
+        // Let's check: MainWindow::onEntityChanged calls this->updateEntity.
+        // We want to notify MainWindow that entity changed.
+        
+        // Actually we need a signal "entityModified" from here to MainWindow.
+        // We have `entitySelected` which updates the panel. Let's use that to update the numbers.
+        // But we also want to update the Visual Mode.
+        // Ideally we emit `updateEntity` signal? No, `updateEntity` method is incoming.
+        
+        // Let's emit `entitySelected` again to update panel numbers
+        emit entitySelected(m_selectedEntity, ent);
+        // And emit dragged for visual update
+        emit entityMoved(m_selectedEntity, ent);
+        
+        return;
+    }
 }
 
 void GridEditor::mouseReleaseEvent(QMouseEvent *event)
@@ -988,6 +1048,11 @@ void GridEditor::mouseReleaseEvent(QMouseEvent *event)
             m_isDraggingSector = false;
             setCursor(Qt::ArrowCursor);
             emit mapChanged(); // Ensure final position is synced
+        }
+        if (m_isDraggingEntity) {
+            m_isDraggingEntity = false;
+            setCursor(Qt::ArrowCursor);
+            emit mapChanged(); // Important to notify changes
         }
     }
     else if (event->button() == Qt::MiddleButton) {
@@ -1266,5 +1331,14 @@ void GridEditor::drawEntities(QPainter &painter)
         painter.setFont(QFont("Arial", 8));
         QFileInfo info(entity.assetPath);
         painter.drawText(pos + QPoint(8, 0), info.fileName());
+    }
+}
+
+void GridEditor::updateEntity(int index, const EntityInstance &entity)
+{
+    if (index >= 0 && index < m_mapData->entities.size()) {
+        m_mapData->entities[index] = entity;
+        emit mapChanged();
+        update();
     }
 }

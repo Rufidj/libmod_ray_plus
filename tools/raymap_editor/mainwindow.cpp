@@ -45,6 +45,7 @@
 #include <algorithm> // for std::max/min // Added based on instruction
 #include <QDialog>
 #include <QDialogButtonBox>
+#include "objimportdialog.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -304,6 +305,11 @@ void MainWindow::createMenus()
     connect(meshGenAction, &QAction::triggered, this, &MainWindow::onOpenMeshGenerator);
     toolsMenu->addAction(meshGenAction);
     
+    QAction *objImportAction = new QAction(tr("Conversor OBJ a MD3..."), this);
+    objImportAction->setShortcut(QKeySequence(tr("Ctrl+Shift+O")));
+    connect(objImportAction, &QAction::triggered, this, &MainWindow::openObjConverter);
+    toolsMenu->addAction(objImportAction);
+    
     // === BUILD MENU ===
     QMenu *buildMenu = menuBar()->addMenu(tr("&Compilar"));
     
@@ -370,15 +376,16 @@ void MainWindow::createToolbars()
     // Edit mode selector
     toolbar->addWidget(new QLabel(tr(" Modo: ")));
     m_modeCombo = new QComboBox();
-    m_modeCombo->addItem("Dibujar Sector");
-    m_modeCombo->addItem("Editar Vértices");
-    m_modeCombo->addItem("Seleccionar Pared");
-    m_modeCombo->addItem("Colocar Sprite");
-    m_modeCombo->addItem("Colocar Spawn");
-    m_modeCombo->addItem("Colocar Cámara");
-    m_modeCombo->addItem("Seleccionar Sector"); // New option
-    // m_modeCombo->addItem("Colocar Decal Suelo");  // DISABLED - Use FPG Editor instead
-    // m_modeCombo->addItem("Colocar Decal Techo");  // DISABLED - Use FPG Editor instead
+    m_modeCombo->addItem("Dibujar Sector", GridEditor::MODE_DRAW_SECTOR);
+    m_modeCombo->addItem("Editar Vértices", GridEditor::MODE_EDIT_VERTICES);
+    m_modeCombo->addItem("Seleccionar Pared", GridEditor::MODE_SELECT_WALL);
+    m_modeCombo->addItem("Seleccionar Entidad", GridEditor::MODE_SELECT_ENTITY); // Added here for visibility
+    m_modeCombo->addItem("Seleccionar Sector", GridEditor::MODE_SELECT_SECTOR);
+    m_modeCombo->addItem("Colocar Sprite", GridEditor::MODE_PLACE_SPRITE);
+    m_modeCombo->addItem("Colocar Spawn", GridEditor::MODE_PLACE_SPAWN);
+    m_modeCombo->addItem("Colocar Cámara", GridEditor::MODE_PLACE_CAMERA);
+    m_modeCombo->addItem("Portal Manual", GridEditor::MODE_MANUAL_PORTAL); // Also beneficial to expose this
+
     connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onModeChanged);
     toolbar->addWidget(m_modeCombo);
@@ -740,6 +747,13 @@ void MainWindow::createDockWindows()
     m_sectorListDock->setWidget(m_sectorTree);
     addDockWidget(Qt::LeftDockWidgetArea, m_sectorListDock);
     
+    // Entity Properties Dock
+    QDockWidget *entityDock = new QDockWidget(tr("Propiedades de Entidad"), this);
+    m_entityPanel = new EntityPropertyPanel();
+    connect(m_entityPanel, &EntityPropertyPanel::entityChanged, this, &MainWindow::onEntityChanged);
+    entityDock->setWidget(m_entityPanel);
+    addDockWidget(Qt::RightDockWidgetArea, entityDock);
+    
     /* DECAL DOCK DISABLED - Replaced by FPG Editor
     // Decal Properties Dock
     m_decalDock = new QDockWidget(tr("Propiedades del Decal"), this);
@@ -856,6 +870,8 @@ void MainWindow::onNewMap()
     connect(editor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
     connect(editor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced); 
     connect(editor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
+    connect(editor, &GridEditor::entitySelected, this, &MainWindow::onEntitySelected);
+    connect(editor, &GridEditor::entityMoved, this, &MainWindow::onEntityChanged); // Live visual update
     
     // Apply current textures to it
     editor->setTextures(m_textureCache);
@@ -987,6 +1003,8 @@ void MainWindow::onImportWLD()
         connect(editor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
         connect(editor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced);
         connect(editor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
+        connect(editor, &GridEditor::entitySelected, this, &MainWindow::onEntitySelected);
+        connect(editor, &GridEditor::entityMoved, this, &MainWindow::onEntityChanged);
         
         m_tabWidget->addTab(editor, tr("Importado %1").arg(QFileInfo(filename).fileName()));
         m_tabWidget->setCurrentWidget(editor);
@@ -1242,7 +1260,8 @@ void MainWindow::onModeChanged(int index)
 {
     GridEditor *editor = getCurrentEditor();
     if (editor) {
-        editor->setEditMode(static_cast<GridEditor::EditMode>(index));
+        int modeId = m_modeCombo->itemData(index).toInt();
+        editor->setEditMode(static_cast<GridEditor::EditMode>(modeId));
     }
 }
 
@@ -3440,6 +3459,8 @@ void MainWindow::openMapFile(const QString &filename)
         connect(editor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
         connect(editor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced);
         connect(editor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
+        connect(editor, &GridEditor::entitySelected, this, &MainWindow::onEntitySelected);
+        connect(editor, &GridEditor::entityMoved, this, &MainWindow::onEntityChanged);
         
         m_tabWidget->addTab(editor, QFileInfo(filename).fileName());
         m_tabWidget->setCurrentWidget(editor);
@@ -3529,4 +3550,32 @@ void MainWindow::onCodePreviewOpenRequested(const QString &filePath)
     onOpenCodeEditor(filePath);
 }
 
+void MainWindow::onEntitySelected(int index, EntityInstance entity)
+{
+    if (m_entityPanel) {
+        m_entityPanel->setEntity(index, entity);
+        // Ensure entity dock is visible?
+        // m_entityDock->show(); 
+    }
+}
 
+void MainWindow::onEntityChanged(int index, EntityInstance entity)
+{
+    GridEditor *editor = getCurrentEditor();
+    if (editor) {
+        editor->updateEntity(index, entity);
+        editor->update(); // Redraw grid
+        
+        // Update visual mode
+        if (m_visualModeWidget && m_visualModeWidget->isVisible()) {
+             m_visualModeWidget->setMapData(*editor->mapData(), false); // false = don't reset camera
+        }
+    }
+}
+
+
+void MainWindow::openObjConverter()
+{
+    ObjImportDialog dialog(this);
+    dialog.exec();
+}
