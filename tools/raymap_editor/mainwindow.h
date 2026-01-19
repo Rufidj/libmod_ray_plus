@@ -16,10 +16,16 @@
 #include <QDockWidget>
 #include "mapdata.h"
 #include "grideditor.h"
+#include "codeeditordialog.h"
+#include "codepreviewpanel.h"
+#include "consolewidget.h"
 #include "textureselector.h"
 #include "visualmodewidget.h"
 #include "fpgeditor.h"
-#include "effectgeneratordialog.h"
+
+class BuildManager;
+class ProjectManager;
+class AssetBrowser;
 
 class MainWindow : public QMainWindow
 {
@@ -30,6 +36,12 @@ public:
     ~MainWindow();
     
 private slots:
+    // ... existing slots ...
+
+    // Code Editor Integration
+    void onOpenCodeEditor(const QString &filePath = QString());
+    void onCodePreviewOpenRequested(const QString &filePath);
+    
     // File menu
     void onNewMap();
     void onOpenMap();
@@ -41,6 +53,11 @@ private slots:
     void openRecentMap();
     void openRecentFPG();
     
+    // Tabs
+    void onTabCloseRequested(int index);
+    void onTabChanged(int index);
+    void openMapFile(const QString &filePath); // Renamed from onOpenMap to avoid ambiguity
+    
     // Tools menu
     void onOpenFPGEditor();
     void onFPGReloaded();
@@ -48,6 +65,22 @@ private slots:
     void onOpenCameraPathEditor();
     void onOpenMeshGenerator(); // NEW: MD3 Generator
     
+    // Project Management
+    void onNewProject();
+    void onOpenProject();
+    void onCloseProject();
+    void onProjectSettings();
+
+    // Build System
+    void onBuildProject();
+    void onRunProject();
+    void onBuildAndRun();
+    void onStopRunning();
+    void onInstallBennuGD2();
+    void onConfigureBennuGD2();
+    void setupBuildSystem();
+    void onGenerateCode();
+
     // View menu
     void onZoomIn();
     void onZoomOut();
@@ -136,11 +169,38 @@ private slots:
     void onDecalAlphaChanged(double value);
     void onDecalRenderOrderChanged(int value);
     void onDeleteDecal();
+
+    // Dark Mode
+    void onToggleDarkMode(bool checked);
+    void loadSettings();
+    void saveSettings();
     
 private:
     // UI Components
-    GridEditor *m_gridEditor;
+    QTabWidget *m_tabWidget; // Replaces m_gridEditor
+    GridEditor* getCurrentEditor() const; // Helper to get current tab
+    
     VisualModeWidget *m_visualModeWidget;
+
+    // Console
+    ConsoleWidget *m_consoleWidget;
+    QDockWidget *m_consoleDock;
+
+    // Code Preview
+    CodePreviewPanel *m_codePreviewPanel;
+    QDockWidget *m_codePreviewDock;
+    
+    // Code Editor Window
+    CodeEditorDialog *m_codeEditorDialog;
+    
+    // Build System
+    BuildManager *m_buildManager;
+
+    // Project System
+    ProjectManager *m_projectManager;
+    AssetBrowser *m_assetBrowser;
+    QDockWidget *m_assetDock;
+
     // Texture cache for selector
     QMap<int, QPixmap> m_textureCache;
     
@@ -195,8 +255,8 @@ private:
     FPGEditor *m_fpgEditor;
     
     // Data
-    MapData m_mapData;
-    QString m_currentMapFile;
+    // MapData m_mapData; // MOVED TO GRIDEDITOR
+    // QString m_currentMapFile; // MOVED TO TAB PROPERTY
     QString m_currentFPGPath;
     int m_currentFPG;
     int m_selectedSectorId;
@@ -248,6 +308,7 @@ private:
     QAction *m_zoomInAction;
     QAction *m_zoomOutAction;
     QAction *m_zoomResetAction;
+    QAction *m_viewGridAction; // NEW: Replaces m_newAction confusion? Or was it missing?
     QAction *m_visualModeAction;
     
     // Insert Tools

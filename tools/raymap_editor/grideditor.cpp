@@ -12,12 +12,17 @@
 #include <QMessageBox>
 #include <QMenu>
 #include <QContextMenuEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
+#include <QFileInfo>
 #include <cmath>
 #include <cfloat>
 
 GridEditor::GridEditor(QWidget *parent)
     : QWidget(parent)
-    , m_mapData(nullptr)
+    , m_mapData(new MapData())
     , m_editMode(MODE_SELECT_SECTOR)
     , m_selectedTexture(1)
     , m_selectedSector(-1)
@@ -36,15 +41,25 @@ GridEditor::GridEditor(QWidget *parent)
     , m_manualPortalMode(false)
     , m_isMovingGroup(false)
     , m_movingGroupId(-1)
+    , m_showGrid(true) // Default true
 {
     setMinimumSize(800, 600);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    setAcceptDrops(true); // Enable Drag & Drop
 }
 
-void GridEditor::setMapData(MapData *data)
+GridEditor::~GridEditor()
 {
-    m_mapData = data;
+    if (m_mapData) {
+        delete m_mapData;
+    }
+}
+
+void GridEditor::newMap()
+{
+    if (m_mapData) delete m_mapData;
+    m_mapData = new MapData();
     update();
 }
 
@@ -83,6 +98,12 @@ void GridEditor::setSelectedWall(int wallId)
 void GridEditor::setZoom(float zoom)
 {
     m_zoom = qBound(0.1f, zoom, 10.0f);
+    update();
+}
+
+void GridEditor::showGrid(bool show)
+{
+    m_showGrid = show;
     update();
 }
 
@@ -318,6 +339,28 @@ int GridEditor::findSpawnFlagAt(const QPointF &worldPos, float tolerance)
     return closestFlag;
 }
 
+int GridEditor::findEntityAt(const QPointF &worldPos, float tolerance)
+{
+    if (!m_mapData) return -1;
+    
+    float minDist = tolerance / m_zoom;
+    int closestEntity = -1;
+    
+    for (int i = 0; i < m_mapData->entities.size(); i++) {
+        const EntityInstance &ent = m_mapData->entities[i];
+        float dx = worldPos.x() - ent.x;
+        float dy = worldPos.y() - ent.y;
+        float dist = std::sqrt(dx * dx + dy * dy);
+        
+        if (dist < minDist) {
+            minDist = dist;
+            closestEntity = i;
+        }
+    }
+    
+    return closestEntity;
+}
+
 float GridEditor::pointToLineDistance(const QPointF &point, const QPointF &lineStart, const QPointF &lineEnd) const
 {
     QPointF v = lineEnd - lineStart;
@@ -369,6 +412,9 @@ void GridEditor::paintEvent(QPaintEvent *event)
     
     // Draw spawn flags
     drawSpawnFlags(painter);
+
+    // Draw entities
+    drawEntities(painter);
     
     // Draw camera
     drawCamera(painter);
@@ -745,7 +791,7 @@ void GridEditor::mousePressEvent(QMouseEvent *event)
             }
                 
             case MODE_PLACE_SPAWN: {
-                int flagId = m_mapData ? m_mapData->spawnFlags.size() + 1 : 1;
+                int flagId = m_mapData ? m_mapData->getNextSpawnEntityId() : 1;
                 if (m_mapData) {
                     SpawnFlag flag;
                     flag.flagId = flagId;
@@ -971,7 +1017,25 @@ void GridEditor::contextMenuEvent(QContextMenuEvent *event)
 {
     QPointF worldPos = screenToWorld(event->pos());
     
-    // Check for spawn flag first (higher priority)
+    // Check for entity first (highest priority)
+    int entityIdx = findEntityAt(worldPos, 15.0f);
+    if (entityIdx >= 0 && m_mapData) {
+        const EntityInstance &ent = m_mapData->entities[entityIdx];
+        
+        QMenu menu(this);
+        QFileInfo info(ent.assetPath);
+        QAction *deleteAction = menu.addAction(tr("Eliminar Entidad '%1' (ID %2)").arg(info.fileName()).arg(ent.spawn_id));
+        
+        QAction *selectedItem = menu.exec(event->globalPos());
+        if (selectedItem == deleteAction) {
+            m_mapData->entities.removeAt(entityIdx);
+            emit mapChanged();
+            update();
+        }
+        return;
+    }
+
+    // Check for spawn flag
     int flagIdx = findSpawnFlagAt(worldPos, 15.0f);
     if (flagIdx >= 0 && m_mapData) {
         const SpawnFlag &flag = m_mapData->spawnFlags[flagIdx];
@@ -1121,3 +1185,86 @@ void GridEditor::cancelGroupMove()
 }
 
 
+
+/* ============================================================================
+   DRAG AND DROP
+   ============================================================================ */
+
+void GridEditor::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+void GridEditor::dragMoveEvent(QDragMoveEvent *event)
+{
+    event->acceptProposedAction();
+}
+
+void GridEditor::dropEvent(QDropEvent *event)
+{
+    const QMimeData *mimeData = event->mimeData();
+    
+    if (mimeData->hasUrls()) {
+        QList<QUrl> urlList = mimeData->urls();
+        if (urlList.isEmpty()) return;
+        
+        QString filePath = urlList.first().toLocalFile();
+        QFileInfo info(filePath);
+        QString ext = info.suffix().toLower();
+        
+        if (ext == "md3") {
+            // Calculate drop position in world coordinates
+            QPointF dropPos = screenToWorld(event->position().toPoint());
+            
+            // Create Entity Instance
+            EntityInstance entity;
+            entity.assetPath = filePath;
+            entity.type = "model";
+            
+            // Generate process name from filename (e.g., "caja.md3" -> "caja")
+            QString baseName = info.completeBaseName();  // Gets filename without extension
+            entity.processName = baseName;
+            
+            entity.x = dropPos.x();
+            entity.y = dropPos.y();
+            entity.z = 0.0f;
+            entity.spawn_id = m_mapData->getNextSpawnEntityId(); // Unified ID generation
+            
+            m_mapData->entities.append(entity);
+            
+            // QMessageBox removed as per user request
+                
+            update();
+            event->acceptProposedAction();
+        }
+    }
+}
+
+void GridEditor::drawEntities(QPainter &painter)
+{
+    if (!m_mapData) return;
+
+    painter.setBrush(QBrush(QColor(0, 200, 255))); // Cyan for entities
+    painter.setPen(QPen(QColor(0, 100, 200), 2));
+    
+    for (const EntityInstance &entity : m_mapData->entities) {
+        QPoint pos = worldToScreen(QPointF(entity.x, entity.y));
+        
+        // Draw diamond shape
+        QPolygon diamond;
+        diamond << QPoint(pos.x(), pos.y() - 6)
+                << QPoint(pos.x() + 6, pos.y())
+                << QPoint(pos.x(), pos.y() + 6)
+                << QPoint(pos.x() - 6, pos.y());
+        
+        painter.drawPolygon(diamond);
+        
+        // Draw entity name/asset
+        painter.setPen(QPen(QColor(200, 255, 255), 1));
+        painter.setFont(QFont("Arial", 8));
+        QFileInfo info(entity.assetPath);
+        painter.drawText(pos + QPoint(8, 0), info.fileName());
+    }
+}

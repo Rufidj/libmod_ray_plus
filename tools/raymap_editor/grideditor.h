@@ -14,9 +14,16 @@ class GridEditor : public QWidget
     
 public:
     explicit GridEditor(QWidget *parent = nullptr);
+    ~GridEditor();
     
     // Map data
-    void setMapData(MapData *data);
+    MapData* mapData() const { return m_mapData; }
+    void newMap(); // Reset map
+    
+    // File management
+    QString fileName() const { return m_fileName; }
+    void setFileName(const QString &file) { m_fileName = file; }
+    
     
     // Textures
     void setTextures(const QMap<int, QPixmap> &textures);
@@ -50,11 +57,15 @@ public:
     void getCameraPosition(float &x, float &y) const;
     bool hasCameraPosition() const { return m_hasCameraPosition; }
 
+    // Grid
+    void showGrid(bool show);
+
     // Group movement
     void setGroupMoveMode(int groupId);  // NEW: Enable group movement mode
     void cancelGroupMove();              // NEW: Cancel group movement
     
 signals:
+    void statusMessage(const QString &msg); // NEW: Consolidated status signal
     void sectorSelected(int sectorId);
     void sectorCreated(int sectorId);  // NEW: Emitted when a new sector is created
     void wallSelected(int sectorIndex, int wallIndex);
@@ -74,7 +85,12 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
-    void contextMenuEvent(QContextMenuEvent *event) override; // NEW
+    void contextMenuEvent(QContextMenuEvent *event) override;
+    
+    // Drag & Drop
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
     
 private:
     MapData *m_mapData;
@@ -113,6 +129,7 @@ private:
     void drawPortals(QPainter &painter);
     void drawSprites(QPainter &painter);
     void drawSpawnFlags(QPainter &painter);
+    void drawEntities(QPainter &painter); // NEW: Draw MD3 entities
     void drawCamera(QPainter &painter);
     void drawCurrentPolygon(QPainter &painter);
     void drawCursorInfo(QPainter &painter);
@@ -136,6 +153,10 @@ private:
     int findWallAt(const QPointF &worldPos, float tolerance = 10.0f);
     int findVertexAt(const QPointF &worldPos, int &sectorId, float tolerance = 10.0f);
     int findSpawnFlagAt(const QPointF &worldPos, float tolerance = 10.0f);
+    int findEntityAt(const QPointF &worldPos, float tolerance = 10.0f); // NEW
+    
+    QString m_fileName;
+    bool m_showGrid;
 };
 
 #endif // GRIDEDITOR_H

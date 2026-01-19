@@ -16,7 +16,15 @@
 #include "meshgeneratordialog.h"
 #include "textureatlasgen.h"
 #include "md3generator.h"
-// #include "rampgeneratordialog.h" // REMOVED
+#include "fpgeditor.h"
+#include "effectgeneratordialog.h"
+#include "camerapatheditor.h"
+#include "meshgeneratordialog.h"
+#include "textureatlasgen.h"
+#include "md3generator.h"
+#include "assetbrowser.h" 
+#include "buildmanager.h"
+#include "projectmanager.h"
 #include <QToolBar>
 #include <QStatusBar>
 #include <QFileDialog>
@@ -46,25 +54,36 @@ MainWindow::MainWindow(QWidget *parent)
     , m_selectedDecalId(-1)
     , m_visualModeWidget(nullptr)
     , m_fpgEditor(nullptr)
+    , m_buildManager(nullptr)
+    , m_consoleWidget(nullptr)
+    , m_projectManager(nullptr)
+    , m_assetBrowser(nullptr)
+    , m_codeEditorDialog(nullptr)
 {
+    m_projectManager = new ProjectManager(this); // Initialize ProjectManager
+    
     setWindowTitle("RayMap Editor - Geometric Sectors");
     resize(1280, 800);
     
     // Create grid editor
-    m_gridEditor = new GridEditor(this);
-    m_gridEditor->setMapData(&m_mapData);
-    setCentralWidget(m_gridEditor);
+    // START TABBED INTERFACE SETUP
+    // Create TabWidget as central widget
+    m_tabWidget = new QTabWidget(this);
+    m_tabWidget->setTabsClosable(true);
+    m_tabWidget->setMovable(true);
+    setCentralWidget(m_tabWidget);
+    
+    connect(m_tabWidget, &QTabWidget::tabCloseRequested, this, &MainWindow::onTabCloseRequested);
+    connect(m_tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
+
+    connect(m_tabWidget, &QTabWidget::tabCloseRequested, this, &MainWindow::onTabCloseRequested);
+    connect(m_tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
+
+    // Initial Map (Empty) - MOVED TO END
+    // END TABBED INTERFACE SETUP
     
     // Connect signals
-    connect(m_gridEditor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
-    connect(m_gridEditor, &GridEditor::sectorCreated, this, &MainWindow::updateSectorList);  // NEW
-    connect(m_gridEditor, &GridEditor::wallSelected, this, &MainWindow::onWallSelected);
-    connect(m_gridEditor, &GridEditor::vertexSelected, this, &MainWindow::onVertexSelected);
-    connect(m_gridEditor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
-    connect(m_gridEditor, &GridEditor::portalWallSelected, this, &MainWindow::onManualPortalWallSelected); 
-    connect(m_gridEditor, &GridEditor::requestDeletePortal, this, &MainWindow::onDeletePortal); // NEW
-    connect(m_gridEditor, &GridEditor::mapChanged, this, &MainWindow::updateVisualMode);
-    connect(m_gridEditor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced);
+    /* Signals connected in onNewMap/openMap etc */
     
     // Create UI
     createActions();
@@ -74,10 +93,26 @@ MainWindow::MainWindow(QWidget *parent)
     createStatusBar();
     
     updateWindowTitle();
+    
+    createStatusBar();
+    
+    updateWindowTitle();
+    
+    updateWindowTitle();
+    
+    // Initialize Build System (m_buildManager, m_consoleWidget)
+    setupBuildSystem();
+    
+    // Initial Map (Empty) - Call after UI init to prevent crashes
+    onNewMap();
+
+    // Load settings (Dark mode, window geometry) AFTER creating all UI
+    loadSettings();
 }
 
 MainWindow::~MainWindow()
 {
+    saveSettings();
 }
 
 /* ============================================================================
@@ -122,6 +157,14 @@ void MainWindow::createActions()
     m_zoomResetAction = new QAction(tr("Restablecer zoom"), this);
     connect(m_zoomResetAction, &QAction::triggered, this, &MainWindow::onZoomReset);
     
+    m_viewGridAction = new QAction(tr("Ver Cuadrícula"), this);
+    m_viewGridAction->setCheckable(true);
+    m_viewGridAction->setChecked(true);
+    connect(m_viewGridAction, &QAction::toggled, this, [this](bool checked) {
+        GridEditor *editor = getCurrentEditor();
+        if (editor) editor->showGrid(checked);
+    });
+    
     m_visualModeAction = new QAction(tr("Modo &Visual"), this);
     m_visualModeAction->setShortcut(QKeySequence(tr("F3")));
     connect(m_visualModeAction, &QAction::triggered, this, &MainWindow::onToggleVisualMode);
@@ -129,6 +172,28 @@ void MainWindow::createActions()
 
 void MainWindow::createMenus()
 {
+    // === PROJECT MENU ===
+    QMenu *projectMenu = menuBar()->addMenu(tr("&Proyecto"));
+    
+    QAction *newProjectAction = new QAction(tr("Nuevo Proyecto..."), this);
+    connect(newProjectAction, &QAction::triggered, this, &MainWindow::onNewProject);
+    projectMenu->addAction(newProjectAction);
+    
+    QAction *openProjectAction = new QAction(tr("Abrir Proyecto..."), this);
+    connect(openProjectAction, &QAction::triggered, this, &MainWindow::onOpenProject);
+    projectMenu->addAction(openProjectAction);
+    
+    QAction *closeProjectAction = new QAction(tr("Cerrar Proyecto"), this);
+    connect(closeProjectAction, &QAction::triggered, this, &MainWindow::onCloseProject);
+    projectMenu->addAction(closeProjectAction);
+    
+    projectMenu->addSeparator();
+    
+    QAction *projectSettingsAction = new QAction(tr("Configuración..."), this);
+    connect(projectSettingsAction, &QAction::triggered, this, &MainWindow::onProjectSettings);
+    projectMenu->addAction(projectSettingsAction);
+
+    // === FILE MENU ===
     QMenu *fileMenu = menuBar()->addMenu(tr("&Archivo"));
     fileMenu->addAction(m_newAction);
     fileMenu->addAction(m_openAction);
@@ -159,6 +224,19 @@ void MainWindow::createMenus()
     viewMenu->addAction(m_zoomInAction);
     viewMenu->addAction(m_zoomOutAction);
     viewMenu->addAction(m_zoomResetAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_viewGridAction);
+    viewMenu->addSeparator();
+    
+    // Dark Mode Toggle
+    QAction *darkModeAction = new QAction(tr("Modo &Oscuro"), this);
+    darkModeAction->setCheckable(true);
+    darkModeAction->setChecked(true); // Default
+    connect(darkModeAction, &QAction::toggled, this, &MainWindow::onToggleDarkMode);
+    // Connect settings load to update this checkbox state? 
+    // Ideally loadSettings would update this action, but for now let's just add it.
+    viewMenu->addAction(darkModeAction);
+    
     viewMenu->addSeparator();
     viewMenu->addAction(m_visualModeAction);
     
@@ -225,6 +303,48 @@ void MainWindow::createMenus()
     meshGenAction->setShortcut(QKeySequence(tr("Ctrl+Shift+M")));
     connect(meshGenAction, &QAction::triggered, this, &MainWindow::onOpenMeshGenerator);
     toolsMenu->addAction(meshGenAction);
+    
+    // === BUILD MENU ===
+    QMenu *buildMenu = menuBar()->addMenu(tr("&Compilar"));
+    
+    QAction *buildAction = new QAction(tr("Compilar Proyecto"), this);
+    buildAction->setShortcut(QKeySequence("F5"));
+    connect(buildAction, &QAction::triggered, this, &MainWindow::onBuildProject);
+    buildMenu->addAction(buildAction);
+    
+    QAction *runAction = new QAction(tr("Ejecutar"), this);
+    runAction->setShortcut(QKeySequence("F9"));
+    connect(runAction, &QAction::triggered, this, &MainWindow::onRunProject);
+    buildMenu->addAction(runAction);
+    
+    QAction *buildRunAction = new QAction(tr("Compilar y Ejecutar"), this);
+    buildRunAction->setShortcut(QKeySequence("Ctrl+R"));
+    connect(buildRunAction, &QAction::triggered, this, &MainWindow::onBuildAndRun);
+    buildMenu->addAction(buildRunAction);
+    
+    buildMenu->addSeparator();
+    
+    QAction *stopAction = new QAction(tr("Detener Ejecución"), this);
+    stopAction->setShortcut(QKeySequence("Shift+F9"));
+    connect(stopAction, &QAction::triggered, this, &MainWindow::onStopRunning);
+    buildMenu->addAction(stopAction);
+    
+    buildMenu->addSeparator();
+    
+    QAction *configAction = new QAction(tr("Configurar BennuGD2..."), this);
+    connect(configAction, &QAction::triggered, this, &MainWindow::onConfigureBennuGD2);
+    buildMenu->addAction(configAction);
+    
+    QAction *installBennuAction = new QAction(tr("Instalar BennuGD2..."), this);
+    connect(installBennuAction, &QAction::triggered, this, &MainWindow::onInstallBennuGD2);
+    buildMenu->addAction(installBennuAction);
+    
+    buildMenu->addSeparator();
+    
+    QAction *genAction = new QAction(tr("Generar Código"), this);
+    genAction->setShortcut(QKeySequence("Ctrl+Shift+G"));
+    connect(genAction, &QAction::triggered, this, &MainWindow::onGenerateCode);
+    buildMenu->addAction(genAction);
     
     // Future tools (disabled for now)
     m_insertDoorAction = new QAction(QIcon::fromTheme("door-open"), tr("Puerta (Próximamente)"), this);
@@ -315,6 +435,26 @@ void MainWindow::createToolbars()
     circleBtn->setToolTip(tr("Crear un sector circular de radio 256"));
     connect(circleBtn, &QPushButton::clicked, this, &MainWindow::onCreateCircle);
     toolbar->addWidget(circleBtn);
+    
+    toolbar->addSeparator();
+    
+    // Build & Run
+    QPushButton *buildBtn = new QPushButton(QIcon::fromTheme("system-run"), tr("Compilar (F5)"));
+    buildBtn->setIcon(QIcon::fromTheme("media-playback-start")); // Using media icon as generic 'start' if system-run fails
+    // actually let's use standard icons if possible, or text if not.
+    // User requested: "compilar y no solo compilar y ejecutar, y si le puedes añadir iconos mejor que mejor"
+    
+    // Build Only
+    QAction *buildToolbarAction = new QAction(QIcon::fromTheme("system-run"), tr("Compilar"), this);
+    buildToolbarAction->setToolTip(tr("Compilar Proyecto (F5)"));
+    connect(buildToolbarAction, &QAction::triggered, this, &MainWindow::onBuildProject);
+    toolbar->addAction(buildToolbarAction);
+    
+    // Build & Run
+    QAction *buildRunToolbarAction = new QAction(QIcon::fromTheme("media-playback-start"), tr("Compilar y Ejecutar"), this);
+    buildRunToolbarAction->setToolTip(tr("Compilar y Ejecutar (Ctrl+F9)"));
+    connect(buildRunToolbarAction, &QAction::triggered, this, &MainWindow::onBuildAndRun);
+    toolbar->addAction(buildRunToolbarAction);
 }
 
 void MainWindow::createDockWindows()
@@ -522,12 +662,74 @@ void MainWindow::createDockWindows()
     m_wallDock->setWidget(wallWidget);
     addDockWidget(Qt::RightDockWidgetArea, m_wallDock);
     
+    // === CONSOLE DOCK ===
+    // Console Dock is created in setupBuildSystem() to ensure BuildManager is also created
+    // So we don't create it here to avoid duplication.
+    // However, we need to ensure setupBuildSystem() is called in constructor.
+    
+    // === CODE PREVIEW DOCK ===
+    m_codePreviewDock = new QDockWidget(tr("Vista Previa de Código"), this);
+    m_codePreviewDock->setObjectName("CodePreviewDock");
+    m_codePreviewPanel = new CodePreviewPanel(this);
+    connect(m_codePreviewPanel, &CodePreviewPanel::openInEditorRequested, 
+            this, &MainWindow::onCodePreviewOpenRequested);
+            
+    m_codePreviewDock->setWidget(m_codePreviewPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_codePreviewDock);
+
+    // --- ASSET BROWSER ---
+    // Created here to ensure correct tab order/stacking
+    m_assetBrowser = new AssetBrowser(this);
+    m_assetDock = new QDockWidget(tr("Explorador de Archivos"), this);
+    m_assetDock->setObjectName("AssetBrowserDock_v2"); // Unique name to avoid old settings
+    m_assetDock->setWidget(m_assetBrowser);
+    m_assetDock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    addDockWidget(Qt::RightDockWidgetArea, m_assetDock);
+    
+    // Connect Asset Browser signals
+    connect(m_assetBrowser, &AssetBrowser::mapFileRequested, this, [this](const QString &path){
+         openMapFile(path); // Use openMapFile instead of QMessageBox
+    });
+    connect(m_assetBrowser, &AssetBrowser::fileClicked, this, [this](const QString &path){
+        if (path.endsWith(".prg") || path.endsWith(".inc") || path.endsWith(".h") || path.endsWith(".c")) {
+            m_codePreviewPanel->showFile(path);
+            if (m_codePreviewDock->isHidden()) m_codePreviewDock->show();
+        }
+    });
+    connect(m_assetBrowser, &AssetBrowser::fpgEditorRequested, this, [this](const QString &path){
+        qDebug() << "Opening FPG Editor for:" << path;
+        
+        // Open FPG Editor window
+        if (!m_fpgEditor) {
+            m_fpgEditor = new FPGEditor(this);
+            connect(m_fpgEditor, &FPGEditor::fpgReloaded, this, &MainWindow::onFPGReloaded);
+        }
+        
+        // Load the selected FPG file
+        m_fpgEditor->setFPGPath(path);
+        m_fpgEditor->loadFPG();
+        
+        // Show and activate the editor
+        m_fpgEditor->show();
+        m_fpgEditor->raise();
+        m_fpgEditor->activateWindow();
+    });
+    connect(m_assetBrowser, &AssetBrowser::fileDoubleClicked, this, [this](const QString &path){
+        QFileInfo info(path);
+        QString ext = info.suffix().toLower();
+        
+        // Open .prg and .h files in code editor
+        if (ext == "prg" || ext == "h" || ext == "inc" || ext == "c") {
+            onOpenCodeEditor(path);
+        }
+    });
+    
     // Sector tree dock (hierarchical with groups)
     m_sectorListDock = new QDockWidget(tr("Sectores"), this);
     m_sectorListDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     
     m_sectorTree = new QTreeWidget();
-    m_sectorTree->setHeaderLabel(tr("Sectores"));
+    m_sectorTree->setHeaderHidden(true);  // Hide header to avoid duplication with dock title
     m_sectorTree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_sectorTree, &QTreeWidget::itemClicked,
             this, &MainWindow::onSectorTreeItemClicked);
@@ -639,165 +841,175 @@ void MainWindow::createStatusBar()
 
 void MainWindow::onNewMap()
 {
-    m_mapData = MapData();
-    m_currentMapFile.clear();
-    m_gridEditor->setMapData(&m_mapData);
+    // Create new GridEditor and MapData
+    GridEditor *editor = new GridEditor(this);
+    // Note: GridEditor now owns its MapData (initialized in its constructor)
+    
+    editor->setEditMode(static_cast<GridEditor::EditMode>(m_modeCombo->currentIndex()));
+    editor->showGrid(m_viewGridAction->isChecked());
+    
+    // Connect signals
+    connect(editor, &GridEditor::statusMessage, this, [this](const QString &msg) {
+        m_statusLabel->setText(msg);
+    });
+    connect(editor, &GridEditor::wallSelected, this, &MainWindow::onWallSelected);
+    connect(editor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
+    connect(editor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced); 
+    connect(editor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
+    
+    // Apply current textures to it
+    editor->setTextures(m_textureCache);
+    
+    // Add to tab
+    int index = m_tabWidget->addTab(editor, tr("Sin Título %1").arg(m_tabWidget->count() + 1));
+    m_tabWidget->setCurrentIndex(index);
+    
+    updateSectorList();
     updateWindowTitle();
-    
-    // Clear sector list UI
-    // m_sectorListWidget->clear(); // Now using m_sectorTree
-    
-    // Sync UI
-    m_skyboxSpin->blockSignals(true);
-    m_skyboxSpin->setValue(0);
-    m_skyboxSpin->blockSignals(false);
-    
-    m_statusLabel->setText(tr("New map created"));
+    m_statusLabel->setText(tr("Nuevo mapa creado"));
 }
 
 void MainWindow::onOpenMap()
 {
-    QString filename = QFileDialog::getOpenFileName(this, tr("Open Map"),
-                                                    "", tr("RayMap Files (*.raymap)"));
+    QString filename = QFileDialog::getOpenFileName(this, tr("Abrir Mapa"),
+                                                    "", tr("RayMap Files (*.rmap *.raymap);;All Files (*)"));
     if (filename.isEmpty()) return;
     
-    if (RayMapFormat::loadMap(filename, m_mapData)) {
-        m_currentMapFile = filename;
-        updateWindowTitle();
-        m_gridEditor->setMapData(&m_mapData);
-        updateSectorList();  // NEW: Update sector list
-        
-        // Sync UI
-        m_skyboxSpin->blockSignals(true);
-        m_skyboxSpin->setValue(m_mapData.skyTextureID);
-        m_skyboxSpin->blockSignals(false);
-        
-        m_statusLabel->setText(tr("Map loaded: %1").arg(filename));
-    } else {
-        QMessageBox::critical(this, tr("Error"), tr("Failed to load map"));
-    }
+    openMapFile(filename);
 }
 
 void MainWindow::onSaveMap()
 {
-    if (m_currentMapFile.isEmpty()) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    if (editor->fileName().isEmpty()) {
         onSaveMapAs();
         return;
     }
     
-    /* Update map data with current editor state */
-    /* Note: Camera X/Y should be updated via onCameraPlaced signal */
-    /* If Z is 0 (default/missing), set it to player height (32) so floor is visible */
-    if (m_mapData.camera.z < 1.0f) {
-        m_mapData.camera.z = 32.0f;
+    // Check camera
+    if (editor->mapData()->camera.z < 1.0f) {
+        editor->mapData()->camera.z = 32.0f; // Default height
     }
     
-    if (RayMapFormat::saveMap(m_currentMapFile, m_mapData)) {
-        addToRecentMaps(m_currentMapFile);
-        m_statusLabel->setText(tr("Map saved: %1").arg(m_currentMapFile));
+    if (RayMapFormat::saveMap(editor->fileName(), *editor->mapData())) {
+        m_statusLabel->setText(tr("Mapa guardado: %1").arg(editor->fileName()));
     } else {
-        QMessageBox::critical(this, tr("Error"), tr("Failed to save map"));
+        QMessageBox::critical(this, tr("Error"), tr("No se pudo guardar el mapa."));
     }
 }
 
 void MainWindow::onSaveMapAs()
 {
-    QString filename = QFileDialog::getSaveFileName(this, tr("Save Map As"),
-                                                    m_currentMapFile,
-                                                    tr("Ray Maps (*.raymap)"));
-    if (filename.isEmpty())
-        return;
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    // Determine default save location
+    QString defaultPath;
+    if (m_projectManager && !m_projectManager->getProjectPath().isEmpty()) {
+        // If project is open, suggest project's maps folder
+        QString mapsDir = m_projectManager->getProjectPath() + "/assets/maps";
+        QDir dir;
+        if (!dir.exists(mapsDir)) {
+            dir.mkpath(mapsDir);  // Create if doesn't exist
+        }
         
-    if (!filename.endsWith(".raymap")) {
-        filename += ".raymap";
-    }
-    
-    /* Update map data with current editor state */
-    /* Note: Camera X/Y should be updated via onCameraPlaced signal */
-    if (m_mapData.camera.z < 1.0f) {
-        m_mapData.camera.z = 32.0f;
-    }
-    
-    if (RayMapFormat::saveMap(filename, m_mapData)) {
-        m_currentMapFile = filename;
-        updateWindowTitle();
-        addToRecentMaps(filename);
-        m_statusLabel->setText(tr("Map saved: %1").arg(filename));
+        // Use existing filename or suggest "new_map.raymap"
+        if (!editor->fileName().isEmpty()) {
+            QFileInfo info(editor->fileName());
+            defaultPath = mapsDir + "/" + info.fileName();
+        } else {
+            defaultPath = mapsDir + "/new_map.raymap";
+        }
     } else {
-        QMessageBox::critical(this, tr("Error"), tr("Failed to save map"));
+        // No project, use current file or empty
+        defaultPath = editor->fileName();
+    }
+
+    QString filename = QFileDialog::getSaveFileName(this, tr("Guardar Mapa Como"), 
+                                                    defaultPath, 
+                                                    tr("RayMap (*.rmap *.raymap)"));
+    if (filename.isEmpty()) return;
+    
+    if (!filename.endsWith(".rmap") && !filename.endsWith(".raymap")) {
+        filename += ".raymap";  // Use .raymap as default
+    }
+    
+    // Check camera
+    if (editor->mapData()->camera.z < 1.0f) {
+        editor->mapData()->camera.z = 32.0f; // Default height
+    }
+    
+    if (RayMapFormat::saveMap(filename, *editor->mapData())) {
+        editor->setFileName(filename);
+        updateWindowTitle();
+        m_tabWidget->setTabText(m_tabWidget->currentIndex(), QFileInfo(filename).fileName());
+        addToRecentMaps(filename);
+        m_statusLabel->setText(tr("Mapa guardado: %1").arg(filename));
+    } else {
+        QMessageBox::critical(this, tr("Error"), tr("No se pudo guardar el mapa."));
     }
 }
 
+
 void MainWindow::onCameraPlaced(float x, float y)
 {
-    m_mapData.camera.x = x;
-    m_mapData.camera.y = y;
-    // Keep existing Z/rotation
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
     
-    qDebug() << "DEBUG: Camera placed and saved at:" << x << "," << y;
-    
-    m_statusLabel->setText(tr("Camera placed at (%1, %2)").arg(x).arg(y));
+    editor->mapData()->camera.x = x;
+    editor->mapData()->camera.y = y;
+    editor->mapData()->camera.enabled = true;
+    m_statusLabel->setText(tr("Cámara colocada en (%1, %2)").arg(x).arg(y));
 }
 
 void MainWindow::onImportWLD()
 {
-    QString filename = QFileDialog::getOpenFileName(this, tr("Importar Archivo WLD"),
-                                                    "", tr("WLD Files (*.wld)"));
+    QString filename = QFileDialog::getOpenFileName(this, tr("Importar WLD"), "", tr("WLD Files (*.wld)"));
     if (filename.isEmpty()) return;
     
-    // Show confirmation dialog
-    QMessageBox::StandardButton reply = QMessageBox::question(
-        this, 
-        tr("Importar WLD"),
-        tr("¿Importar el archivo WLD?\n\nEsto reemplazará el mapa actual."),
-        QMessageBox::Yes | QMessageBox::No
-    );
+    // Create new tab for import
+    GridEditor *editor = new GridEditor(this);
     
-    if (reply != QMessageBox::Yes) return;
-    
-    // Import WLD file
-    m_statusLabel->setText(tr("Importando WLD..."));
-    qApp->processEvents();
-    
-    if (WLDImporter::importWLD(filename, m_mapData)) {
-        // Update editor
-        m_gridEditor->setMapData(&m_mapData);
+    if (WLDImporter::importWLD(filename, *editor->mapData())) {
+        // Setup editor
+        editor->setFileName(""); // Imported, so no filename yet
+        editor->setEditMode(static_cast<GridEditor::EditMode>(m_modeCombo->currentIndex()));
+        editor->showGrid(m_viewGridAction->isChecked());
+        editor->setTextures(m_textureCache);
+        
+        // Connect signals
+        connect(editor, &GridEditor::statusMessage, this, [this](const QString &msg) {
+            m_statusLabel->setText(msg);
+        });
+        connect(editor, &GridEditor::wallSelected, this, &MainWindow::onWallSelected);
+        connect(editor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
+        connect(editor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced);
+        connect(editor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
+        
+        m_tabWidget->addTab(editor, tr("Importado %1").arg(QFileInfo(filename).fileName()));
+        m_tabWidget->setCurrentWidget(editor);
+        
         updateSectorList();
-        
-        // Clear current file (force Save As)
-        m_currentMapFile.clear();
         updateWindowTitle();
-        
-        m_statusLabel->setText(tr("WLD importado: %1 sectores, %2 portales")
-                              .arg(m_mapData.sectors.size())
-                              .arg(m_mapData.portals.size()));
-        
-        QMessageBox::information(this, tr("Importación Exitosa"),
-                               tr("Archivo WLD importado correctamente.\n\n"
-                                  "Sectores: %1\n"
-                                  "Portales: %2\n"
-                                  "Spawn Flags: %3\n\n"
-                                  "Usa 'Guardar como...' para guardar en formato .raymap")
-                               .arg(m_mapData.sectors.size())
-                               .arg(m_mapData.portals.size())
-                               .arg(m_mapData.spawnFlags.size()));
+        updateVisualMode();
+        m_statusLabel->setText(tr("WLD Importado: %1").arg(filename));
     } else {
-        m_statusLabel->setText(tr("Error al importar WLD"));
-        QMessageBox::critical(this, tr("Error"),
-                            tr("No se pudo importar el archivo WLD.\n\n"
-                               "Verifica que el archivo sea válido."));
+        delete editor;
+        QMessageBox::critical(this, tr("Error"), tr("No se pudo importar el archivo WLD."));
     }
 }
 
 void MainWindow::onLoadFPG()
 {
-    QString filename = QFileDialog::getOpenFileName(this, tr("Load FPG"),
-                                                    "", tr("FPG Files (*.fpg)"));
+    QString filename = QFileDialog::getOpenFileName(this, tr("Cargar FPG"), "", tr("FPG Files (*.fpg *.map)"));
     if (filename.isEmpty()) return;
     
-    QVector<TextureEntry> textures;
+    QVector<TextureEntry> textures; // Declared here
     
     // Load FPG with progress callback
+    // FPGLoader is static, use class name
     bool success = FPGLoader::loadFPG(filename, textures, 
         [this](int current, int total, const QString &name) {
             m_statusLabel->setText(tr("Loading FPG: %1/%2 - %3")
@@ -810,13 +1022,25 @@ void MainWindow::onLoadFPG()
         QMap<int, QPixmap> textureMap = FPGLoader::getTextureMap(textures);
         
         // Store textures in map data
-        m_mapData.textures.clear();
+        // m_mapData accessed via current editor or we need to update all open editors?
+        // Let's assume global FPG for now like before
+        
+        // m_mapData.textures.clear(); // NO, we don't have m_mapData member anymore
+        
+        m_textureCache.clear();
         for (const TextureEntry &entry : textures) {
-            m_mapData.textures.append(entry);
+            m_textureCache[entry.id] = entry.pixmap;
         }
         
-        // Update grid editor
-        m_gridEditor->setTextures(textureMap);
+        // Update Grid Editor
+        // Update all editors
+         for (int i=0; i<m_tabWidget->count(); i++) {
+            GridEditor *ed = qobject_cast<GridEditor*>(m_tabWidget->widget(i));
+            if (ed) {
+                ed->setTextures(m_textureCache);
+                ed->update();
+            }
+        }
         
         // Cache textures for selector
         m_textureCache.clear();
@@ -825,13 +1049,11 @@ void MainWindow::onLoadFPG()
         }
         
         addToRecentFPGs(filename);
-        m_currentFPGPath = filename;  // Store FPG path for editor
+        m_currentFPGPath = filename;  // Store FPG path using correct member
         m_statusLabel->setText(tr("FPG loaded: %1 textures from %2")
                               .arg(textures.size()).arg(filename));
     } else {
-        QMessageBox::critical(this, tr("Error"), 
-                            tr("Failed to load FPG file: %1").arg(filename));
-        m_statusLabel->setText(tr("Failed to load FPG"));
+        QMessageBox::critical(this, tr("Error"), tr("No se pudo cargar el archivo FPG.").arg(filename));
     }
 }
 
@@ -920,66 +1142,44 @@ void MainWindow::addToRecentFPGs(const QString &filename)
 
 void MainWindow::openRecentMap()
 {
-    QAction *action = qobject_cast<QAction*>(sender());
-    if (!action) return;
-    
-    QString filename = action->data().toString();
-    if (RayMapFormat::loadMap(filename, m_mapData)) {
-        m_currentMapFile = filename;
-        updateWindowTitle();
-        m_gridEditor->setMapData(&m_mapData);
-        updateSectorList();
-        updateVisualMode();
-        addToRecentMaps(filename);
-        m_statusLabel->setText(tr("Mapa cargado: %1").arg(QFileInfo(filename).fileName()));
+    QAction *action = qobject_cast<QAction *>(sender());
+    if (action) {
+        openMapFile(action->data().toString());
     }
 }
 
 void MainWindow::openRecentFPG()
 {
-    QAction *action = qobject_cast<QAction*>(sender());
-    if (!action) return;
-    
-    QString filename = action->data().toString();
-    
-    // Reload FPG using the same logic as onLoadFPG
-    QVector<TextureEntry> textures;
-    
-    // Load FPG with progress callback
-    bool success = FPGLoader::loadFPG(filename, textures, 
-        [this](int current, int total, const QString &name) {
-            m_statusLabel->setText(tr("Cargando FPG: %1/%2 - %3")
-                                  .arg(current).arg(total).arg(name));
-            qApp->processEvents();
-        });
-    
-    if (success) {
-        // Convert to texture map
-        QMap<int, QPixmap> textureMap = FPGLoader::getTextureMap(textures);
+    QAction *action = qobject_cast<QAction *>(sender());
+    if (action) {
+        QString filename = action->data().toString();
         
-        // Store textures in map data
-        m_mapData.textures.clear();
-        for (const TextureEntry &entry : textures) {
-            m_mapData.textures.append(entry);
+        QVector<TextureEntry> textures;
+        bool success = FPGLoader::loadFPG(filename, textures, nullptr);
+        
+        if (success) {
+            m_currentFPGPath = filename; // Consistent variable
+            addToRecentFPGs(filename);
+            
+            QMap<int, QPixmap> textureMap = FPGLoader::getTextureMap(textures);
+            m_textureCache.clear();
+            for (auto it = textureMap.begin(); it != textureMap.end(); ++it) {
+                 m_textureCache.insert(it.key(), it.value());
+            }
+            // Also populate cache from Vector if needed, but getTextureMap does it.
+            // Wait, previous code used loop over map
+            m_textureCache = textureMap; // Simple assignment
+            
+            m_statusLabel->setText(tr("FPG cargado: %1 (%2 texturas)").arg(filename).arg(m_textureCache.size()));
+            
+             for (int i=0; i<m_tabWidget->count(); i++) {
+                GridEditor *ed = qobject_cast<GridEditor*>(m_tabWidget->widget(i));
+                if (ed) {
+                    ed->setTextures(m_textureCache);
+                    ed->update();
+                }
+            }
         }
-        
-        // Update grid editor
-        m_gridEditor->setTextures(textureMap);
-        
-        // Cache textures for selector
-        m_textureCache.clear();
-        for (const TextureEntry &entry : textures) {
-            m_textureCache[entry.id] = entry.pixmap;
-        }
-        
-        addToRecentFPGs(filename);
-        m_statusLabel->setText(tr("FPG cargado: %1 texturas desde %2")
-                              .arg(textures.size()).arg(QFileInfo(filename).fileName()));
-        updateVisualMode();
-    } else {
-        QMessageBox::critical(this, tr("Error"), 
-                            tr("No se pudo cargar el archivo FPG: %1").arg(filename));
-        m_statusLabel->setText(tr("Error al cargar FPG"));
     }
 }
 
@@ -989,48 +1189,48 @@ void MainWindow::openRecentFPG()
 
 void MainWindow::onZoomIn()
 {
-    m_gridEditor->setZoom(m_gridEditor->property("zoom").toFloat() * 1.2f);
+    GridEditor *editor = getCurrentEditor();
+    if (editor)
+        editor->setZoom(editor->property("zoom").toFloat() * 1.2f);
 }
 
 void MainWindow::onZoomOut()
 {
-    m_gridEditor->setZoom(m_gridEditor->property("zoom").toFloat() / 1.2f);
+    GridEditor *editor = getCurrentEditor();
+    if (editor)
+        editor->setZoom(editor->property("zoom").toFloat() / 1.2f);
 }
 
 void MainWindow::onZoomReset()
 {
-    m_gridEditor->setZoom(1.0f);
+    GridEditor *editor = getCurrentEditor();
+    if (editor)
+        editor->setZoom(1.0f);
 }
 
 void MainWindow::onToggleVisualMode()
 {
-    // Create widget if it doesn't exist
     if (!m_visualModeWidget) {
         m_visualModeWidget = new VisualModeWidget();
-        
-        // Set map data
-        m_visualModeWidget->setMapData(m_mapData);
-        
-        // Load textures
-        qDebug() << "Loading" << m_mapData.textures.size() << "textures to Visual Mode...";
-        for (const TextureEntry &entry : m_mapData.textures) {
-            qDebug() << "  Loading texture ID" << entry.id << "size:" << entry.pixmap.size();
-            m_visualModeWidget->loadTexture(entry.id, entry.pixmap.toImage());
-        }
-        
-        qDebug() << "Visual Mode widget created with" << m_mapData.textures.size() << "textures";
     }
     
-    // Toggle visibility
     if (m_visualModeWidget->isVisible()) {
         m_visualModeWidget->hide();
     } else {
-        m_visualModeWidget->show();
-        m_visualModeWidget->raise();
-        m_visualModeWidget->activateWindow();
+        GridEditor *editor = getCurrentEditor();
+        if (editor) {
+             m_visualModeWidget->setMapData(*editor->mapData());
+             // Load textures to visual mode... this might be heavy if done every time
+             // ideally VisualModeWidget should share texture cache or similar
+             for (auto it = m_textureCache.begin(); it != m_textureCache.end(); ++it) {
+                 m_visualModeWidget->loadTexture(it.key(), it.value().toImage());
+             }
+             
+             m_visualModeWidget->show();
+             m_visualModeWidget->raise();
+             m_visualModeWidget->activateWindow();
+        }
     }
-    
-    m_statusLabel->setText(tr("Modo Visual %1").arg(m_visualModeWidget->isVisible() ? "activado" : "desactivado"));
 }
 
 
@@ -1040,12 +1240,18 @@ void MainWindow::onToggleVisualMode()
 
 void MainWindow::onModeChanged(int index)
 {
-    m_gridEditor->setEditMode(static_cast<GridEditor::EditMode>(index));
+    GridEditor *editor = getCurrentEditor();
+    if (editor) {
+        editor->setEditMode(static_cast<GridEditor::EditMode>(index));
+    }
 }
 
 void MainWindow::onTextureSelected(int textureId)
 {
-    m_gridEditor->setSelectedTexture(textureId);
+    GridEditor *editor = getCurrentEditor();
+    if (editor) {
+        editor->setSelectedTexture(textureId);
+    }
 }
 
 /* ============================================================================
@@ -1084,69 +1290,81 @@ void MainWindow::onVertexSelected(int sectorId, int vertexIndex)
 
 void MainWindow::onSectorFloorZChanged(double value)
 {
-    // Find sector by ID, not by index
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            sector.floor_z = value;
-            qDebug() << "Updated sector" << m_selectedSectorId << "floor_z to" << value;
-            m_gridEditor->update();
-            updateVisualMode();
-            return;
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    
+    if (m_selectedSectorId != -1) {
+        for (Sector &sector : editor->mapData()->sectors) {
+            if (sector.sector_id == m_selectedSectorId) {
+                sector.floor_z = value;
+                editor->update();
+                updateVisualMode();
+                break;
+            }
         }
     }
-    qDebug() << "WARNING: Sector" << m_selectedSectorId << "not found for floor_z update";
 }
 
 void MainWindow::onSectorCeilingZChanged(double value)
 {
-    // Find sector by ID, not by index
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            sector.ceiling_z = value;
-            qDebug() << "Updated sector" << m_selectedSectorId << "ceiling_z to" << value;
-            m_gridEditor->update();
-            updateVisualMode();
-            return;
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    if (m_selectedSectorId != -1) {
+        for (Sector &sector : editor->mapData()->sectors) {
+            if (sector.sector_id == m_selectedSectorId) {
+                sector.ceiling_z = value;
+                editor->update();
+                updateVisualMode();
+                break;
+            }
         }
     }
-    qDebug() << "WARNING: Sector" << m_selectedSectorId << "not found for ceiling_z update";
 }
 
 void MainWindow::onSectorFloorTextureChanged(int value)
 {
-    // Find sector by ID, not by index
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            sector.floor_texture_id = value;
-            qDebug() << "Updated sector" << m_selectedSectorId << "floor_texture_id to" << value;
-            m_gridEditor->update();
-            updateVisualMode();
-            return;
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    if (m_selectedSectorId != -1) {
+        for (Sector &sector : editor->mapData()->sectors) {
+            if (sector.sector_id == m_selectedSectorId) {
+                sector.floor_texture_id = value;
+                editor->update();
+                updateVisualMode();
+                break;
+            }
         }
     }
-    qDebug() << "WARNING: Sector" << m_selectedSectorId << "not found for floor_texture update";
 }
 
 void MainWindow::onSectorCeilingTextureChanged(int value)
 {
-    // Find sector by ID, not by index
-    for (Sector &sector : m_mapData.sectors) {
-        if (sector.sector_id == m_selectedSectorId) {
-            sector.ceiling_texture_id = value;
-            qDebug() << "Updated sector" << m_selectedSectorId << "ceiling_texture_id to" << value;
-            m_gridEditor->update();
-            updateVisualMode();
-            return;
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    if (m_selectedSectorId != -1) {
+        for (Sector &sector : editor->mapData()->sectors) {
+            if (sector.sector_id == m_selectedSectorId) {
+                sector.ceiling_texture_id = value;
+                editor->update();
+                updateVisualMode();
+                break;
+            }
         }
     }
-    qDebug() << "WARNING: Sector" << m_selectedSectorId << "not found for ceiling_texture update";
 }
 
 void MainWindow::onSelectSectorFloorTexture()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     int sectorIndex = -1;
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        if (m_mapData.sectors[i].sector_id == m_selectedSectorId) {
+    for (int i = 0; i < map->sectors.size(); i++) {
+        if (map->sectors[i].sector_id == m_selectedSectorId) {
             sectorIndex = i;
             break;
         }
@@ -1161,13 +1379,9 @@ void MainWindow::onSelectSectorFloorTexture()
     if (selector.exec() == QDialog::Accepted) {
         int textureId = selector.selectedTextureId();
         
-        // DEBUG
-        QMessageBox::information(this, "DEBUG", 
-            QString("Selector: Aplicando textura SUELO %1 al sector %2").arg(textureId).arg(m_selectedSectorId));
-            
         // Direct update
-        m_mapData.sectors[sectorIndex].floor_texture_id = textureId;
-        m_gridEditor->update();
+        map->sectors[sectorIndex].floor_texture_id = textureId;
+        editor->update();
         updateVisualMode();
         
         // Update UI preventing signal loop
@@ -1179,9 +1393,13 @@ void MainWindow::onSelectSectorFloorTexture()
 
 void MainWindow::onSelectSectorCeilingTexture()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     int sectorIndex = -1;
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        if (m_mapData.sectors[i].sector_id == m_selectedSectorId) {
+    for (int i = 0; i < map->sectors.size(); i++) {
+        if (map->sectors[i].sector_id == m_selectedSectorId) {
             sectorIndex = i;
             break;
         }
@@ -1196,13 +1414,9 @@ void MainWindow::onSelectSectorCeilingTexture()
     if (selector.exec() == QDialog::Accepted) {
         int textureId = selector.selectedTextureId();
         
-        // DEBUG
-        QMessageBox::information(this, "DEBUG", 
-            QString("Selector: Aplicando textura TECHO %1 al sector %2").arg(textureId).arg(m_selectedSectorId));
-            
         // Direct update
-        m_mapData.sectors[sectorIndex].ceiling_texture_id = textureId;
-        m_gridEditor->update();
+        map->sectors[sectorIndex].ceiling_texture_id = textureId;
+        editor->update();
         updateVisualMode();
         
         // Update UI preventing signal loop
@@ -1225,30 +1439,44 @@ void MainWindow::onWallSelected(int sectorIndex, int wallIndex)
 
 void MainWindow::onWallTextureLowerChanged(int value)
 {
-    if (m_selectedSectorId >= 0 && m_selectedSectorId < m_mapData.sectors.size() &&
-        m_selectedWallId >= 0 && m_selectedWallId < m_mapData.sectors[m_selectedSectorId].walls.size()) {
-        m_mapData.sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_lower = value;
-        m_gridEditor->update();
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (m_selectedSectorId >= 0 && m_selectedSectorId < map->sectors.size() &&
+        m_selectedWallId >= 0 && m_selectedWallId < map->sectors[m_selectedSectorId].walls.size()) {
+        map->sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_lower = value;
+        editor->update();
         updateVisualMode();
     }
 }
 
 void MainWindow::onWallTextureMiddleChanged(int value)
 {
-    if (m_selectedSectorId >= 0 && m_selectedSectorId < m_mapData.sectors.size() &&
-        m_selectedWallId >= 0 && m_selectedWallId < m_mapData.sectors[m_selectedSectorId].walls.size()) {
-        m_mapData.sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_middle = value;
-        m_gridEditor->update();
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (m_selectedSectorId >= 0 && m_selectedSectorId < map->sectors.size() &&
+        m_selectedWallId >= 0 && m_selectedWallId < map->sectors[m_selectedSectorId].walls.size()) {
+        map->sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_middle = value;
+        editor->update();
         updateVisualMode();
     }
 }
 
+
+
 void MainWindow::onWallTextureUpperChanged(int value)
 {
-    if (m_selectedSectorId >= 0 && m_selectedSectorId < m_mapData.sectors.size() &&
-        m_selectedWallId >= 0 && m_selectedWallId < m_mapData.sectors[m_selectedSectorId].walls.size()) {
-        m_mapData.sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_upper = value;
-        m_gridEditor->update();
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (m_selectedSectorId >= 0 && m_selectedSectorId < map->sectors.size() &&
+        m_selectedWallId >= 0 && m_selectedWallId < map->sectors[m_selectedSectorId].walls.size()) {
+        map->sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_upper = value;
+        editor->update();
         updateVisualMode();
     }
 }
@@ -1282,7 +1510,11 @@ void MainWindow::onSelectWallTextureUpper()
 
 void MainWindow::onApplyTextureToAllWalls()
 {
-    if (m_selectedSectorId < 0 || m_selectedSectorId >= m_mapData.sectors.size()) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (m_selectedSectorId < 0 || m_selectedSectorId >= map->sectors.size()) {
         QMessageBox::warning(this, tr("Advertencia"), 
                            tr("Selecciona una pared primero para identificar el sector"));
         return;
@@ -1293,12 +1525,12 @@ void MainWindow::onApplyTextureToAllWalls()
     
     
     // Apply to all walls in the sector
-    Sector &sector = m_mapData.sectors[m_selectedSectorId];
+    Sector &sector = map->sectors[m_selectedSectorId];
     for (Wall &wall : sector.walls) {
         wall.texture_id_middle = textureId;
     }
     
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     
     QMessageBox::information(this, tr("Éxito"), 
@@ -1310,11 +1542,14 @@ void MainWindow::onApplyTextureToAllWalls()
 
 void MainWindow::onWallSplitLowerChanged(double value)
 {
-    for (Sector &sector : m_mapData.sectors) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    for (Sector &sector : editor->mapData()->sectors) {
         for (Wall &wall : sector.walls) {
             if (wall.wall_id == m_selectedWallId) {
                 wall.texture_split_z_lower = value;
-                m_gridEditor->update();
+                editor->update();
                 updateVisualMode();
                 return;
             }
@@ -1324,11 +1559,14 @@ void MainWindow::onWallSplitLowerChanged(double value)
 
 void MainWindow::onWallSplitUpperChanged(double value)
 {
-    for (Sector &sector : m_mapData.sectors) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
+    for (Sector &sector : editor->mapData()->sectors) {
         for (Wall &wall : sector.walls) {
             if (wall.wall_id == m_selectedWallId) {
                 wall.texture_split_z_upper = value;
-                m_gridEditor->update();
+                editor->update();
                 return;
             }
         }
@@ -1341,13 +1579,16 @@ void MainWindow::onWallSplitUpperChanged(double value)
 
 void MainWindow::onToggleManualPortals(bool checked)
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
     if (checked) {
-        m_gridEditor->setEditMode(GridEditor::MODE_MANUAL_PORTAL);
+        editor->setEditMode(GridEditor::MODE_MANUAL_PORTAL);
         m_statusLabel->setText(tr("Modo Portal Manual: Selecciona la PRIMERA pared para el portal..."));
         m_pendingPortalSector = -1;
         m_pendingPortalWall = -1;
     } else {
-        m_gridEditor->setEditMode(GridEditor::MODE_SELECT_SECTOR); // Default back to generic selection
+        editor->setEditMode(GridEditor::MODE_SELECT_SECTOR); // Default back to generic selection
         m_statusLabel->setText(tr("Modo Portal Manual desactivado"));
         m_pendingPortalSector = -1;
         m_pendingPortalWall = -1;
@@ -1356,6 +1597,10 @@ void MainWindow::onToggleManualPortals(bool checked)
 
 void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     if (sectorIndex < 0 || wallIndex < 0) return;
     
     // Check if we are selecting Source or Target
@@ -1363,8 +1608,8 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
         // --- STEP 1: SOURCE SELECTION ---
         
         // Validation: Verify wall exists
-        if (sectorIndex >= m_mapData.sectors.size()) return;
-        Sector &sector = m_mapData.sectors[sectorIndex];
+        if (sectorIndex >= map->sectors.size()) return;
+        Sector &sector = map->sectors[sectorIndex];
         if (wallIndex >= sector.walls.size()) return;
         
         Wall &wall = sector.walls[wallIndex];
@@ -1399,11 +1644,11 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
         
         // Create Portal!
         // Get Source Wall
-        Sector &secA = m_mapData.sectors[m_pendingPortalSector];
+        Sector &secA = map->sectors[m_pendingPortalSector];
         Wall &wallA = secA.walls[m_pendingPortalWall];
         
         // Get Target Wall
-        Sector &secB = m_mapData.sectors[sectorIndex];
+        Sector &secB = map->sectors[sectorIndex];
         Wall &wallB = secB.walls[wallIndex];
         
         // NOTE: Build Engine allows multiple portals per wall
@@ -1418,7 +1663,7 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
         
         // Create Portal Data
         Portal portal;
-        portal.portal_id = m_mapData.getNextPortalId();
+        portal.portal_id = map->getNextPortalId();
         portal.sector_a = secA.sector_id;
         portal.sector_b = secB.sector_id;
         portal.wall_id_a = wallA.wall_id;
@@ -1430,7 +1675,7 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
         portal.x2 = wallA.x2;
         portal.y2 = wallA.y2;
         
-        m_mapData.portals.append(portal);
+        map->portals.append(portal);
         
         // Assign IDs
         wallA.portal_id = portal.portal_id;
@@ -1447,7 +1692,7 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
             wallB.texture_id_lower = wallB.texture_id_middle;
         }
         
-        m_gridEditor->update(); // Redraw
+        editor->update(); // Redraw
         
         QMessageBox::information(this, tr("Portal Creado"), 
             tr("Portal creado correctamente entre Sector %1 y Sector %2.").arg(secA.sector_id).arg(secB.sector_id));
@@ -1461,18 +1706,15 @@ void MainWindow::onManualPortalWallSelected(int sectorIndex, int wallIndex)
 
 void MainWindow::onDetectPortals()
 {
-    if (m_mapData.sectors.size() < 2) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (map->sectors.size() < 2) {
         QMessageBox::information(this, tr("Portal Detection"),
                                tr("Need at least 2 sectors to detect portals"));
         return;
     }
-    
-    // Warn user that this might reset MANUAL portals on the same wall?
-    // The original logic clears ALL portals: m_mapData.portals.clear();
-    // Maybe we should CHANGE this to only ADD portals or ask?
-    // User asked "volver a poner... lo de asignar portales automaticamente".
-    // I will restore it as it was (destructive clear), but maybe add a warning?
-    // Or better: Let's restore it exactly as it was for now, but assume it clears existing portals.
     
     QMessageBox::StandardButton reply = QMessageBox::question(this, tr("Auto-Detect Portals"),
         tr("This will CLEAR all existing portals (including manual ones) and auto-detect them.\nContinue?"),
@@ -1480,10 +1722,10 @@ void MainWindow::onDetectPortals()
     if (reply != QMessageBox::Yes) return;
 
     // Clear existing portals
-    m_mapData.portals.clear();
+    map->portals.clear();
     
     // Reset portal IDs in all walls
-    for (Sector &sector : m_mapData.sectors) {
+    for (Sector &sector : map->sectors) {
         for (Wall &wall : sector.walls) {
             wall.portal_id = -1;
         }
@@ -1499,12 +1741,12 @@ void MainWindow::onDetectPortals()
         geologyChanged = false;
         if (geometryFixes > 100) break; 
         
-        for (int i = 0; i < m_mapData.sectors.size(); i++) {
-            Sector &sectorA = m_mapData.sectors[i];
+        for (int i = 0; i < map->sectors.size(); i++) {
+            Sector &sectorA = map->sectors[i];
             
-            for (int k = 0; k < m_mapData.sectors.size(); k++) {
+            for (int k = 0; k < map->sectors.size(); k++) {
                 if (i == k) continue;
-                Sector &sectorB = m_mapData.sectors[k];
+                Sector &sectorB = map->sectors[k];
                 
                 for (const QPointF &vB : sectorB.vertices) {
                     for (int wA = 0; wA < sectorA.walls.size(); wA++) {
@@ -1534,7 +1776,7 @@ void MainWindow::onDetectPortals()
                                 for (int v = 0; v < sectorA.vertices.size(); v++) {
                                     int next = (v + 1) % sectorA.vertices.size();
                                     Wall newWall;
-                                    newWall.wall_id = m_mapData.getNextWallId();
+                                    newWall.wall_id = map->getNextWallId();
                                     newWall.x1 = sectorA.vertices[v].x();
                                     newWall.y1 = sectorA.vertices[v].y();
                                     newWall.x2 = sectorA.vertices[next].x();
@@ -1570,11 +1812,11 @@ void MainWindow::onDetectPortals()
     int closestSectorA = -1;
     int closestSectorB = -1;
     
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        Sector &sectorA = m_mapData.sectors[i];
+    for (int i = 0; i < map->sectors.size(); i++) {
+        Sector &sectorA = map->sectors[i];
         
-        for (int j = i + 1; j < m_mapData.sectors.size(); j++) {
-            Sector &sectorB = m_mapData.sectors[j];
+        for (int j = i + 1; j < map->sectors.size(); j++) {
+            Sector &sectorB = map->sectors[j];
             
             for (int wallIdxA = 0; wallIdxA < sectorA.walls.size(); wallIdxA++) {
                 Wall &wallA = sectorA.walls[wallIdxA];
@@ -1606,7 +1848,7 @@ void MainWindow::onDetectPortals()
                     
                     if (normalMatch || reversedMatch) {
                         Portal portal;
-                        portal.portal_id = m_mapData.getNextPortalId();
+                        portal.portal_id = map->getNextPortalId();
                         portal.sector_a = sectorA.sector_id;
                         portal.sector_b = sectorB.sector_id;
                         portal.wall_id_a = wallA.wall_id;
@@ -1616,7 +1858,7 @@ void MainWindow::onDetectPortals()
                         portal.x2 = wallA.x2;
                         portal.y2 = wallA.y2;
                         
-                        m_mapData.portals.append(portal);
+                        map->portals.append(portal);
                         
                         wallA.portal_id = portal.portal_id;
                         wallB.portal_id = portal.portal_id;
@@ -1630,7 +1872,7 @@ void MainWindow::onDetectPortals()
     }
     
     
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     
     QString resultMsg;
@@ -1654,8 +1896,12 @@ void MainWindow::onDetectPortals()
 
 void MainWindow::onDeletePortal(int sectorIndex, int wallIndex)
 {
-    if (sectorIndex < 0 || sectorIndex >= m_mapData.sectors.size()) return;
-    Sector &sector = m_mapData.sectors[sectorIndex];
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (sectorIndex < 0 || sectorIndex >= map->sectors.size()) return;
+    Sector &sector = map->sectors[sectorIndex];
     if (wallIndex < 0 || wallIndex >= sector.walls.size()) return;
     
     Wall &wall = sector.walls[wallIndex];
@@ -1672,9 +1918,9 @@ void MainWindow::onDeletePortal(int sectorIndex, int wallIndex)
     
     // Remove portal from list
     bool removed = false;
-    for (int i = 0; i < m_mapData.portals.size(); i++) {
-        if (m_mapData.portals[i].portal_id == portalId) {
-            m_mapData.portals.removeAt(i);
+    for (int i = 0; i < map->portals.size(); i++) {
+        if (map->portals[i].portal_id == portalId) {
+            map->portals.removeAt(i);
             removed = true;
             break;
         }
@@ -1682,7 +1928,7 @@ void MainWindow::onDeletePortal(int sectorIndex, int wallIndex)
     
     // Reset walls referencing this portal
     int wallsUpdated = 0;
-    for (Sector &s : m_mapData.sectors) {
+    for (Sector &s : map->sectors) {
         for (Wall &w : s.walls) {
             if (w.portal_id == portalId) {
                 w.portal_id = -1;
@@ -1691,7 +1937,7 @@ void MainWindow::onDeletePortal(int sectorIndex, int wallIndex)
         }
     }
     
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     m_statusLabel->setText(tr("Portal %1 eliminado (referencias limpiadas: %2)").arg(portalId).arg(wallsUpdated));
 }
@@ -1703,24 +1949,32 @@ void MainWindow::onDeletePortal(int sectorIndex, int wallIndex)
 void MainWindow::updateWindowTitle()
 {
     QString title = "RayMap Editor - Geometric Sectors";
-    if (!m_currentMapFile.isEmpty()) {
-        title += " - " + QFileInfo(m_currentMapFile).fileName();
+    GridEditor *editor = getCurrentEditor();
+    if (editor && !editor->fileName().isEmpty()) {
+        title += " - " + QFileInfo(editor->fileName()).fileName();
     }
     setWindowTitle(title);
 }
 
 void MainWindow::updateSectorPanel()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) {
+        m_sectorIdLabel->setText(tr("No sector selected"));
+        return;
+    }
+    auto *map = editor->mapData();
+
     int sectorIndex = -1;
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        if (m_mapData.sectors[i].sector_id == m_selectedSectorId) {
+    for (int i = 0; i < map->sectors.size(); i++) {
+        if (map->sectors[i].sector_id == m_selectedSectorId) {
             sectorIndex = i;
             break;
         }
     }
 
     if (sectorIndex != -1) {
-        const Sector &sector = m_mapData.sectors[sectorIndex];
+        const Sector &sector = map->sectors[sectorIndex];
         m_sectorIdLabel->setText(tr("Sector %1").arg(sector.sector_id));
         
         m_sectorFloorZSpin->blockSignals(true);
@@ -1747,10 +2001,18 @@ void MainWindow::updateSectorPanel()
 
 void MainWindow::updateWallPanel()
 {
-    if (m_selectedSectorId >= 0 && m_selectedSectorId < m_mapData.sectors.size() &&
-        m_selectedWallId >= 0 && m_selectedWallId < m_mapData.sectors[m_selectedSectorId].walls.size()) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) {
+        m_wallIdLabel->setText(tr("No wall selected"));
+        m_portalTexGroup->setVisible(false);
+        return;
+    }
+    auto *map = editor->mapData();
+
+    if (m_selectedSectorId >= 0 && m_selectedSectorId < map->sectors.size() &&
+        m_selectedWallId >= 0 && m_selectedWallId < map->sectors[m_selectedSectorId].walls.size()) {
         
-        const Wall &wall = m_mapData.sectors[m_selectedSectorId].walls[m_selectedWallId];
+        const Wall &wall = map->sectors[m_selectedSectorId].walls[m_selectedWallId];
         // Show Wall Index (0..N) instead of internal wall_id which might be uninitialized/duplicate
         m_wallIdLabel->setText(tr("Wall %1").arg(m_selectedWallId));
         m_wallTextureLowerSpin->setValue(wall.texture_id_lower);
@@ -1795,16 +2057,20 @@ void MainWindow::updateSectorList()
     
     m_sectorTree->clear();
     
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+    
     // Create set of grouped sectors
     QSet<int> groupedSectors;
-    for (const SectorGroup &group : m_mapData.sectorGroups) {
+    for (const SectorGroup &group : map->sectorGroups) {
         for (int id : group.sector_ids) {
             groupedSectors.insert(id);
         }
     }
     
     // Add groups as parent nodes
-    for (const SectorGroup &group : m_mapData.sectorGroups) {
+    for (const SectorGroup &group : map->sectorGroups) {
         QTreeWidgetItem *groupItem = new QTreeWidgetItem(m_sectorTree);
         groupItem->setText(0, QString("📁 %1 (%2 sectores)")
                           .arg(group.name)
@@ -1815,7 +2081,7 @@ void MainWindow::updateSectorList()
         
         // Add child sectors
         for (int sectorId : group.sector_ids) {
-            const Sector *sector = m_mapData.findSector(sectorId);
+            const Sector *sector = map->findSector(sectorId);
             if (sector) {
                 QTreeWidgetItem *sectorItem = new QTreeWidgetItem(groupItem);
                 sectorItem->setText(0, QString("  Sector %1").arg(sectorId));
@@ -1825,7 +2091,7 @@ void MainWindow::updateSectorList()
     }
     
     // Add ungrouped sectors
-    for (const Sector &sector : m_mapData.sectors) {
+    for (const Sector &sector : map->sectors) {
         if (!groupedSectors.contains(sector.sector_id)) {
             QTreeWidgetItem *item = new QTreeWidgetItem(m_sectorTree);
             item->setText(0, QString("Sector %1").arg(sector.sector_id));
@@ -1839,13 +2105,16 @@ void MainWindow::onSectorTreeItemClicked(QTreeWidgetItem *item, int column)
     Q_UNUSED(column);
     if (!item) return;
     
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+
     int data = item->data(0, Qt::UserRole).toInt();
     
     // Negative values are groups, positive are sector IDs
     if (data >= 0) {
         // It's a sector
         int sectorId = data;
-        m_gridEditor->setSelectedSector(sectorId);
+        editor->setSelectedSector(sectorId);
         onSectorSelected(sectorId);
     }
 }
@@ -1874,6 +2143,10 @@ void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
     QTreeWidgetItem *item = m_sectorTree->itemAt(pos);
     if (!item) return;
     
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+    
     QMenu menu;
     int data = item->data(0, Qt::UserRole).toInt();
     
@@ -1897,11 +2170,11 @@ void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
             QStringList sectorNames;
             QList<int> sectorIds;
             
-            for (const Sector &sector : m_mapData.sectors) {
+            for (const Sector &sector : map->sectors) {
                 // Only ungrouped sectors can be parents for now
                 // A sector is ungrouped if its group_id is -1 (or not part of any group in m_mapData.sectorGroups)
                 bool isUngrouped = true;
-                for (const SectorGroup &group : m_mapData.sectorGroups) {
+                for (const SectorGroup &group : map->sectorGroups) {
                     if (group.sector_ids.contains(sector.sector_id)) {
                         isUngrouped = false;
                         break;
@@ -1931,18 +2204,18 @@ void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
                 qDebug() << "Assigning parent sector" << parentId << "to group" << groupId;
                 
                 // Set parent for all sectors in group
-                SectorGroup *group = m_mapData.findGroup(groupId);
+                SectorGroup *group = map->findGroup(groupId);
                 if (group) {
                     qDebug() << "Found group with" << group->sector_ids.size() << "sectors";
                     for (int sectorId : group->sector_ids) {
-                        Sector *sector = m_mapData.findSector(sectorId);
+                        Sector *sector = map->findSector(sectorId);
                         if (sector) {
                             sector->parent_sector_id = parentId;
                             qDebug() << "  Set sector" << sectorId << "parent_sector_id =" << parentId;
                         }
                     }
                     m_statusLabel->setText(tr("Sector padre asignado al grupo '%1'").arg(group->name));
-                    m_gridEditor->update();
+                    editor->update();
                 } else {
                     qDebug() << "ERROR: Group" << groupId << "not found!";
                 }
@@ -1951,12 +2224,12 @@ void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
             QMessageBox::information(this, tr("Mover Grupo"),
                 tr("Haz clic y arrastra en el mapa para mover todo el grupo.\n"
                    "Presiona ESC para cancelar."));
-            m_gridEditor->setGroupMoveMode(groupId);
+            editor->setGroupMoveMode(groupId);
         } else if (selected == deleteAction) {
             // Remove group but keep sectors
-            for (int i = 0; i < m_mapData.sectorGroups.size(); i++) {
-                if (m_mapData.sectorGroups[i].group_id == groupId) {
-                    m_mapData.sectorGroups.removeAt(i);
+            for (int i = 0; i < map->sectorGroups.size(); i++) {
+                if (map->sectorGroups[i].group_id == groupId) {
+                    map->sectorGroups.removeAt(i);
                     updateSectorList();
                     break;
                 }
@@ -1966,21 +2239,25 @@ void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
         // It's a sector
         int sectorId = data;
         menu.addAction(tr("Eliminar sector"), this, [this, sectorId]() {
+            GridEditor *editor = getCurrentEditor();
+            if (!editor) return;
+            auto *map = editor->mapData();
+            
             // Find and remove sector
-            for (int i = 0; i < m_mapData.sectors.size(); i++) {
-                if (m_mapData.sectors[i].sector_id == sectorId) {
-                    m_mapData.sectors.removeAt(i);
+            for (int i = 0; i < map->sectors.size(); i++) {
+                if (map->sectors[i].sector_id == sectorId) {
+                    map->sectors.removeAt(i);
                     
                     // Remove from any groups
-                    for (SectorGroup &group : m_mapData.sectorGroups) {
+                    for (SectorGroup &group : map->sectorGroups) {
                         group.sector_ids.removeAll(sectorId);
                     }
                     
                     updateSectorList();
-                    m_gridEditor->update();
+                    editor->update();
                 }
             }
-        }); // Closing brace for the lambda
+        }); 
     }
     menu.exec(m_sectorTree->mapToGlobal(pos));
 }
@@ -1991,6 +2268,10 @@ void MainWindow::onSectorTreeContextMenu(const QPoint &pos)
 
 void MainWindow::deleteSelectedSector()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     if (m_selectedSectorId < 0) return;
     
     QMessageBox::StandardButton reply = QMessageBox::question(
@@ -2002,18 +2283,18 @@ void MainWindow::deleteSelectedSector()
     
     // Find sector sectorIndex
     int sectorIndex = -1;
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        if (m_mapData.sectors[i].sector_id == m_selectedSectorId) {
+    for (int i = 0; i < map->sectors.size(); i++) {
+        if (map->sectors[i].sector_id == m_selectedSectorId) {
             sectorIndex = i;
             break;
         }
     }
     
     if (sectorIndex >= 0) {
-        m_mapData.sectors.removeAt(sectorIndex);
+        map->sectors.removeAt(sectorIndex);
         m_selectedSectorId = -1;
         updateSectorList();
-        m_gridEditor->update();
+        editor->update();
         updateVisualMode();
         m_statusLabel->setText(tr("Sector eliminado"));
     }
@@ -2021,10 +2302,14 @@ void MainWindow::deleteSelectedSector()
 
 void MainWindow::copySelectedSector()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     if (m_selectedSectorId < 0) return;
     
     // Find sector
-    for (const Sector &sec : m_mapData.sectors) {
+    for (const Sector &sec : map->sectors) {
         if (sec.sector_id == m_selectedSectorId) {
             m_clipboardSector = sec;
             m_hasClipboard = true;
@@ -2037,13 +2322,17 @@ void MainWindow::copySelectedSector()
 void MainWindow::pasteSector()
 {
     if (!m_hasClipboard) return;
+
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
     
     // Create new sector from clipboard
     Sector newSector = m_clipboardSector;
     
     // Assign new unique ID
     int infoMaxId = 0;
-    for (const Sector &s : m_mapData.sectors) {
+    for (const Sector &s : map->sectors) {
         if (s.sector_id > infoMaxId) infoMaxId = s.sector_id;
     }
     newSector.sector_id = infoMaxId + 1;
@@ -2073,10 +2362,10 @@ void MainWindow::pasteSector()
     }
     
     // Add to map
-    m_mapData.sectors.append(newSector);
+    map->sectors.append(newSector);
     
     updateSectorList();
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     m_statusLabel->setText(tr("Sector pegado como ID %1").arg(newSector.sector_id));
     
@@ -2087,6 +2376,10 @@ void MainWindow::pasteSector()
 
 void MainWindow::moveSelectedSector()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     if (m_selectedSectorId < 0) return;
     
     // Create dialog
@@ -2123,9 +2416,9 @@ void MainWindow::moveSelectedSector()
         if (dx == 0 && dy == 0) return;
         
         // Find and update sector
-        for (int i = 0; i < m_mapData.sectors.size(); i++) {
-            if (m_mapData.sectors[i].sector_id == m_selectedSectorId) {
-                Sector &sec = m_mapData.sectors[i];
+        for (int i = 0; i < map->sectors.size(); i++) {
+            if (map->sectors[i].sector_id == m_selectedSectorId) {
+                Sector &sec = map->sectors[i];
                 
                 // Update vertices
                 for (int v = 0; v < sec.vertices.size(); v++) {
@@ -2146,7 +2439,7 @@ void MainWindow::moveSelectedSector()
                 }
                 sec.portal_ids.clear(); 
                 
-                m_gridEditor->update();
+                editor->update();
                 updateVisualMode();
                 m_statusLabel->setText(tr("Sector movido"));
                 break;
@@ -2157,6 +2450,10 @@ void MainWindow::moveSelectedSector()
 
 void MainWindow::onCreateRectangle()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     // Ask for size
     bool ok;
     int size = QInputDialog::getInt(this, tr("Crear Rectángulo"),
@@ -2166,7 +2463,7 @@ void MainWindow::onCreateRectangle()
     
     // Create rectangle centered at origin
     Sector newSector;
-    newSector.sector_id = m_mapData.getNextSectorId();
+    newSector.sector_id = map->getNextSectorId();
     
     float half = size / 2.0f;
     newSector.vertices.append(QPointF(-half, -half));  // Bottom-left
@@ -2184,7 +2481,7 @@ void MainWindow::onCreateRectangle()
     for (int i = 0; i < 4; i++) {
         int next = (i + 1) % 4;
         Wall wall;
-        wall.wall_id = m_mapData.getNextWallId();
+        wall.wall_id = map->getNextWallId();
         wall.x1 = newSector.vertices[i].x();
         wall.y1 = newSector.vertices[i].y();
         wall.x2 = newSector.vertices[next].x();
@@ -2196,9 +2493,9 @@ void MainWindow::onCreateRectangle()
         newSector.walls.append(wall);
     }
     
-    m_mapData.sectors.append(newSector);
+    map->sectors.append(newSector);
     updateSectorList();
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     
     m_statusLabel->setText(tr("Rectángulo %1x%1 creado (Sector %2)")
@@ -2207,6 +2504,10 @@ void MainWindow::onCreateRectangle()
 
 void MainWindow::onCreateCircle()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     // Ask for radius
     bool ok;
     int radius = QInputDialog::getInt(this, tr("Crear Círculo"),
@@ -2217,7 +2518,7 @@ void MainWindow::onCreateCircle()
     // Create circle with 16 segments
     int segments = 16;
     Sector newSector;
-    newSector.sector_id = m_mapData.getNextSectorId();
+    newSector.sector_id = map->getNextSectorId();
     
     for (int i = 0; i < segments; i++) {
         float angle = (float)i / segments * 2.0f * M_PI;
@@ -2236,7 +2537,7 @@ void MainWindow::onCreateCircle()
     for (int i = 0; i < segments; i++) {
         int next = (i + 1) % segments;
         Wall wall;
-        wall.wall_id = m_mapData.getNextWallId();
+        wall.wall_id = map->getNextWallId();
         wall.x1 = newSector.vertices[i].x();
         wall.y1 = newSector.vertices[i].y();
         wall.x2 = newSector.vertices[next].x();
@@ -2248,9 +2549,9 @@ void MainWindow::onCreateCircle()
         newSector.walls.append(wall);
     }
     
-    m_mapData.sectors.append(newSector);
+    map->sectors.append(newSector);
     updateSectorList();
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     
     m_statusLabel->setText(tr("Círculo de radio %1 creado (Sector %2)")
@@ -2263,6 +2564,10 @@ void MainWindow::onCreateCircle()
 
 void MainWindow::onInsertBox()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     // Show configuration dialog with texture previews
     InsertBoxDialog dialog(m_textureCache, this);
     if (dialog.exec() != QDialog::Accepted) {
@@ -2289,7 +2594,7 @@ void MainWindow::onInsertBox()
     
     // Create new sector
     Sector newSector;
-    newSector.sector_id = m_mapData.getNextSectorId();
+    newSector.sector_id = map->getNextSectorId();
     newSector.floor_z = floorZ;
     newSector.ceiling_z = ceilingZ;
     newSector.floor_texture_id = floorTexture;
@@ -2301,7 +2606,7 @@ void MainWindow::onInsertBox()
     
     // Wall 0: Bottom (left to right)
     Wall wall0;
-    wall0.wall_id = 0;
+    wall0.wall_id = map->getNextWallId(); // Use unique ID generator
     wall0.x1 = centerX - hw;
     wall0.y1 = centerY - hh;
     wall0.x2 = centerX + hw;
@@ -2314,7 +2619,7 @@ void MainWindow::onInsertBox()
     
     // Wall 1: Right (bottom to top)
     Wall wall1;
-    wall1.wall_id = 1;
+    wall1.wall_id = map->getNextWallId();
     wall1.x1 = centerX + hw;
     wall1.y1 = centerY - hh;
     wall1.x2 = centerX + hw;
@@ -2327,7 +2632,7 @@ void MainWindow::onInsertBox()
     
     // Wall 2: Top (right to left)
     Wall wall2;
-    wall2.wall_id = 2;
+    wall2.wall_id = map->getNextWallId();
     wall2.x1 = centerX + hw;
     wall2.y1 = centerY + hh;
     wall2.x2 = centerX - hw;
@@ -2340,7 +2645,7 @@ void MainWindow::onInsertBox()
     
     // Wall 3: Left (top to bottom)
     Wall wall3;
-    wall3.wall_id = 3;
+    wall3.wall_id = map->getNextWallId();
     wall3.x1 = centerX - hw;
     wall3.y1 = centerY + hh;
     wall3.x2 = centerX - hw;
@@ -2358,13 +2663,13 @@ void MainWindow::onInsertBox()
     newSector.vertices.append(QPointF(centerX - hw, centerY + hh));  // Top-left
     
     // Add sector to map
-    m_mapData.sectors.append(newSector);
-    int newSectorIndex = m_mapData.sectors.size() - 1;
+    map->sectors.append(newSector);
+    int newSectorIndex = map->sectors.size() - 1;
     
     // Auto-detect parent sector (sector containing the box center)
     int parentSectorIndex = -1;
     for (int i = 0; i < newSectorIndex; i++) {
-        const Sector &sector = m_mapData.sectors[i];
+        const Sector &sector = map->sectors[i];
         
         // Point-in-polygon test
         bool inside = false;
@@ -2387,16 +2692,16 @@ void MainWindow::onInsertBox()
     
     // Assign parent-child relationship
     if (parentSectorIndex >= 0) {
-        m_mapData.sectors[newSectorIndex].parent_sector_id = m_mapData.sectors[parentSectorIndex].sector_id;
+        map->sectors[newSectorIndex].parent_sector_id = map->sectors[parentSectorIndex].sector_id;
         
         // Add this sector as child of parent
-        m_mapData.sectors[parentSectorIndex].child_sector_ids.append(newSector.sector_id);
+        map->sectors[parentSectorIndex].child_sector_ids.append(newSector.sector_id);
         
         m_statusLabel->setText(tr("Caja creada (Sector %1) como hijo del Sector %2")
                               .arg(newSector.sector_id)
-                              .arg(m_mapData.sectors[parentSectorIndex].sector_id));
+                              .arg(map->sectors[parentSectorIndex].sector_id));
     } else {
-        m_mapData.sectors[newSectorIndex].parent_sector_id = -1;  // Root sector
+        map->sectors[newSectorIndex].parent_sector_id = -1;  // Root sector
         m_statusLabel->setText(tr("Caja creada (Sector %1) como sector raíz")
                               .arg(newSector.sector_id));
     }
@@ -2407,7 +2712,7 @@ void MainWindow::onInsertBox()
     
     // Update UI
     updateSectorList();
-    m_gridEditor->update();
+    editor->update();
     updateVisualMode();
     
     m_statusLabel->setText(tr("Caja creada (Sector %1) en (%2, %3)")
@@ -2472,6 +2777,10 @@ void MainWindow::onInsertStairs()
 
 void MainWindow::onSetParentSector()
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     // Get currently selected item from tree
     QTreeWidgetItem *selectedItem = m_sectorTree->currentItem();
     if (!selectedItem) {
@@ -2490,8 +2799,8 @@ void MainWindow::onSetParentSector()
     int selectedSectorId = data;
     
     int selectedIndex = -1;
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        if (m_mapData.sectors[i].sector_id == selectedSectorId) {
+    for (int i = 0; i < map->sectors.size(); i++) {
+        if (map->sectors[i].sector_id == selectedSectorId) {
             selectedIndex = i;
             break;
         }
@@ -2512,9 +2821,9 @@ void MainWindow::onSetParentSector()
     noneItem->setData(Qt::UserRole, -1);
     parentList->addItem(noneItem);
     
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
+    for (int i = 0; i < map->sectors.size(); i++) {
         if (i == selectedIndex) continue;
-        const Sector &sector = m_mapData.sectors[i];
+        const Sector &sector = map->sectors[i];
         QListWidgetItem *item = new QListWidgetItem(tr("Sector %1").arg(sector.sector_id));
         item->setData(Qt::UserRole, sector.sector_id);
         parentList->addItem(item);
@@ -2528,14 +2837,14 @@ void MainWindow::onSetParentSector()
     
     if (dialog.exec() == QDialog::Accepted && parentList->currentItem()) {
         int newParentId = parentList->currentItem()->data(Qt::UserRole).toInt();
-        int oldParentId = m_mapData.sectors[selectedIndex].parent_sector_id;
+        int oldParentId = map->sectors[selectedIndex].parent_sector_id;
         
         // Remove from old parent's children list
         if (oldParentId >= 0) {
             bool foundOldParent = false;
-            for (int i = 0; i < m_mapData.sectors.size(); i++) {
-                if (m_mapData.sectors[i].sector_id == oldParentId) {
-                    m_mapData.sectors[i].child_sector_ids.removeAll(selectedSectorId);
+            for (int i = 0; i < map->sectors.size(); i++) {
+                if (map->sectors[i].sector_id == oldParentId) {
+                    map->sectors[i].child_sector_ids.removeAll(selectedSectorId);
                     foundOldParent = true;
                     break;
                 }
@@ -2545,15 +2854,15 @@ void MainWindow::onSetParentSector()
             }
         }
         
-        m_mapData.sectors[selectedIndex].parent_sector_id = newParentId;
+        map->sectors[selectedIndex].parent_sector_id = newParentId;
         
         // Add to new parent's children list
         if (newParentId >= 0) {
             bool foundNewParent = false;
-            for (int i = 0; i < m_mapData.sectors.size(); i++) {
-                if (m_mapData.sectors[i].sector_id == newParentId) {
-                    if (!m_mapData.sectors[i].child_sector_ids.contains(selectedSectorId)) {
-                        m_mapData.sectors[i].child_sector_ids.append(selectedSectorId);
+            for (int i = 0; i < map->sectors.size(); i++) {
+                if (map->sectors[i].sector_id == newParentId) {
+                    if (!map->sectors[i].child_sector_ids.contains(selectedSectorId)) {
+                        map->sectors[i].child_sector_ids.append(selectedSectorId);
                     }
                     foundNewParent = true;
                     break;
@@ -2563,7 +2872,7 @@ void MainWindow::onSetParentSector()
                 QMessageBox::critical(this, tr("Error"),
                                     tr("No se pudo encontrar el sector padre %1!").arg(newParentId));
                 // Revert the change
-                m_mapData.sectors[selectedIndex].parent_sector_id = oldParentId;
+                map->sectors[selectedIndex].parent_sector_id = oldParentId;
                 return;
             }
         }
@@ -2582,35 +2891,43 @@ void MainWindow::onSetParentSector()
 
 void MainWindow::onPortalUpperChanged(int val)
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     // Update data directly and sync the other spinbox
-    if (m_selectedSectorId >= 0 && m_selectedSectorId < m_mapData.sectors.size() &&
-        m_selectedWallId >= 0 && m_selectedWallId < m_mapData.sectors[m_selectedSectorId].walls.size()) {
+    if (m_selectedSectorId >= 0 && m_selectedSectorId < map->sectors.size() &&
+        m_selectedWallId >= 0 && m_selectedWallId < map->sectors[m_selectedSectorId].walls.size()) {
         
-        m_mapData.sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_upper = val;
+        map->sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_upper = val;
         
         // Sync the standard upper spinbox
         m_wallTextureUpperSpin->blockSignals(true);
         m_wallTextureUpperSpin->setValue(val);
         m_wallTextureUpperSpin->blockSignals(false);
         
-        m_gridEditor->update();
+        editor->update();
         updateVisualMode();
     }
 }
 
 void MainWindow::onPortalLowerChanged(int val)
 {
-    if (m_selectedSectorId >= 0 && m_selectedSectorId < m_mapData.sectors.size() &&
-        m_selectedWallId >= 0 && m_selectedWallId < m_mapData.sectors[m_selectedSectorId].walls.size()) {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    if (m_selectedSectorId >= 0 && m_selectedSectorId < map->sectors.size() &&
+        m_selectedWallId >= 0 && m_selectedWallId < map->sectors[m_selectedSectorId].walls.size()) {
         
-        m_mapData.sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_lower = val;
+        map->sectors[m_selectedSectorId].walls[m_selectedWallId].texture_id_lower = val;
         
         // Sync the standard lower spinbox
         m_wallTextureLowerSpin->blockSignals(true);
         m_wallTextureLowerSpin->setValue(val);
         m_wallTextureLowerSpin->blockSignals(false);
         
-        m_gridEditor->update();
+        editor->update();
         updateVisualMode();
     }
 }
@@ -2635,14 +2952,17 @@ void MainWindow::onSelectPortalLower()
 
 void MainWindow::onSkyboxTextureChanged(int value)
 {
-    m_mapData.skyTextureID = value;
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    editor->mapData()->skyTextureID = value;
     updateVisualMode();
 }
 
 void MainWindow::updateVisualMode()
 {
-    if (m_visualModeWidget && m_visualModeWidget->isVisible()) {
-        m_visualModeWidget->setMapData(m_mapData, false); // false = Don't reset camera
+    GridEditor *editor = getCurrentEditor();
+    if (m_visualModeWidget && m_visualModeWidget->isVisible() && editor) {
+        m_visualModeWidget->setMapData(*editor->mapData(), false); // false = Don't reset camera
     }
 }
 
@@ -2652,13 +2972,17 @@ void MainWindow::updateVisualMode()
 
 void MainWindow::onDecalPlaced(float x, float y)
 {
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
     int mode = m_modeCombo->currentIndex();
     bool isFloor = (mode == 7); // "Colocar Decal Suelo"
     
     // Find which sector contains this point
     int targetSectorId = -1;
-    for (int i = 0; i < m_mapData.sectors.size(); i++) {
-        const Sector &sector = m_mapData.sectors[i];
+    for (int i = 0; i < map->sectors.size(); i++) {
+        const Sector &sector = map->sectors[i];
         
         // Check if point is inside sector using ray casting algorithm
         bool inside = false;
@@ -2688,7 +3012,7 @@ void MainWindow::onDecalPlaced(float x, float y)
     
     // Create new decal
     Decal decal;
-    decal.id = m_mapData.getNextDecalId();
+    decal.id = map->getNextDecalId();
     decal.sector_id = targetSectorId;
     decal.is_floor = isFloor;
     decal.x = x;
@@ -2700,8 +3024,8 @@ void MainWindow::onDecalPlaced(float x, float y)
     decal.alpha = m_decalAlphaSpin->value();
     decal.render_order = m_decalRenderOrderSpin->value();
     
-    m_mapData.decals.append(decal);
-    m_gridEditor->update();
+    map->decals.append(decal);
+    editor->update();
     
     // Auto-select the newly created decal and show properties panel
     m_selectedDecalId = decal.id;
@@ -2721,55 +3045,79 @@ void MainWindow::onDecalSelected(int decalId)
 
 void MainWindow::onDecalXChanged(double value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->x = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDecalYChanged(double value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->y = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDecalWidthChanged(double value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->width = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDecalHeightChanged(double value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->height = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDecalRotationChanged(double value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->rotation = value * M_PI / 180.0f; // Degrees to radians
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDecalTextureChanged(int value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->texture_id = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
@@ -2784,30 +3132,42 @@ void MainWindow::onSelectDecalTexture()
 
 void MainWindow::onDecalAlphaChanged(double value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->alpha = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDecalRenderOrderChanged(int value)
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (decal) {
         decal->render_order = value;
-        m_gridEditor->update();
+        editor->update();
     }
 }
 
 void MainWindow::onDeleteDecal()
 {
-    for (int i = 0; i < m_mapData.decals.size(); i++) {
-        if (m_mapData.decals[i].id == m_selectedDecalId) {
-            m_mapData.decals.removeAt(i);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) return;
+    auto *map = editor->mapData();
+
+    for (int i = 0; i < map->decals.size(); i++) {
+        if (map->decals[i].id == m_selectedDecalId) {
+            map->decals.removeAt(i);
             m_selectedDecalId = -1;
             m_decalDock->hide();
-            m_gridEditor->update();
+            editor->update();
             m_statusLabel->setText(tr("Decal eliminado"));
             break;
         }
@@ -2816,7 +3176,14 @@ void MainWindow::onDeleteDecal()
 
 void MainWindow::updateDecalPanel()
 {
-    Decal *decal = m_mapData.findDecal(m_selectedDecalId);
+    GridEditor *editor = getCurrentEditor();
+    if (!editor) {
+        m_decalIdLabel->setText(tr("Ninguno"));
+        return;
+    }
+    auto *map = editor->mapData();
+
+    Decal *decal = map->findDecal(m_selectedDecalId);
     if (!decal) {
         m_decalIdLabel->setText(tr("Ninguno"));
         return;
@@ -2883,16 +3250,21 @@ void MainWindow::onFPGReloaded()
     if (success) {
         QMap<int, QPixmap> textureMap = FPGLoader::getTextureMap(textures);
         
-        m_mapData.textures.clear();
-        for (const TextureEntry &entry : textures) {
-            m_mapData.textures.append(entry);
-        }
-        
-        m_gridEditor->setTextures(textureMap);
-        
         m_textureCache.clear();
         for (const TextureEntry &entry : textures) {
             m_textureCache[entry.id] = entry.pixmap;
+        }
+
+        // Apply to all editors
+        for (int i=0; i<m_tabWidget->count(); i++) {
+            GridEditor *editor = qobject_cast<GridEditor*>(m_tabWidget->widget(i));
+            if (editor) {
+                editor->mapData()->textures.clear();
+                for (const TextureEntry &entry : textures) {
+                    editor->mapData()->textures.append(entry);
+                }
+                editor->setTextures(textureMap);
+            }
         }
         
         m_statusLabel->setText(tr("FPG reloaded: %1 textures").arg(textures.size()));
@@ -2908,9 +3280,12 @@ void MainWindow::onOpenEffectGenerator()
 
 void MainWindow::onOpenCameraPathEditor()
 {
-    CameraPathEditor *editor = new CameraPathEditor(m_mapData, this);
-    editor->exec();
-    delete editor;
+    GridEditor *editor = getCurrentEditor();
+    if (editor) {
+        CameraPathEditor *pathEditor = new CameraPathEditor(*editor->mapData(), this);
+        pathEditor->exec();
+        delete pathEditor;
+    }
 }
 
 void MainWindow::onOpenMeshGenerator()
@@ -2989,5 +3364,169 @@ void MainWindow::onOpenMeshGenerator()
     }
 }
 
-// void MainWindow::onGenerateRamp() ... REMOVED logic or commented out
+// Build System Slots
+// Build System Slots are implemented in mainwindow_build.cpp
+
+// void MainWindow::onGenerateCode() ... REMOVED logic or commented out
 // Function body removed
+
+/* ============================================================================
+   TABBED INTERFACE IMPLEMENTATION
+   ============================================================================ */
+
+void MainWindow::onTabCloseRequested(int index)
+{
+    GridEditor *editor = qobject_cast<GridEditor*>(m_tabWidget->widget(index));
+    if (!editor) return;
+
+    // Check for unsaved changes?
+    // For now, just close
+    
+    // If it's the last tab, maybe create a new empty one?
+    m_tabWidget->removeTab(index);
+    delete editor;
+    
+    if (m_tabWidget->count() == 0) {
+        onNewMap(); // Create default new map
+    }
+}
+
+void MainWindow::onTabChanged(int index)
+{
+    Q_UNUSED(index);
+    updateWindowTitle();
+    updateSectorList();
+    updateSectorPanel();
+    updateWallPanel();
+    
+    GridEditor *editor = getCurrentEditor();
+    if (editor) {
+        // Update visual mode widget if needed
+    }
+}
+
+GridEditor* MainWindow::getCurrentEditor() const
+{
+    return qobject_cast<GridEditor*>(m_tabWidget->currentWidget());
+}
+
+void MainWindow::openMapFile(const QString &filename)
+{
+    // Check if already open?
+    for (int i=0; i<m_tabWidget->count(); i++) {
+        GridEditor *ed = qobject_cast<GridEditor*>(m_tabWidget->widget(i));
+        if (ed && ed->fileName() == filename) {
+             m_tabWidget->setCurrentIndex(i);
+             return;
+        }
+    }
+
+    GridEditor *editor = new GridEditor(const_cast<MainWindow*>(this)); // Parent is this
+    if (RayMapFormat::loadMap(filename, *editor->mapData())) {
+        editor->setFileName(filename);
+        
+        // Setup editor
+        editor->setEditMode(static_cast<GridEditor::EditMode>(m_modeCombo->currentIndex()));
+        if (m_viewGridAction) {
+             editor->showGrid(m_viewGridAction->isChecked());
+        }
+        editor->setTextures(m_textureCache);
+        
+        // Connect signals
+        connect(editor, &GridEditor::statusMessage, this, [this](const QString &msg) {
+            m_statusLabel->setText(msg);
+        });
+        connect(editor, &GridEditor::wallSelected, this, &MainWindow::onWallSelected);
+        connect(editor, &GridEditor::sectorSelected, this, &MainWindow::onSectorSelected);
+        connect(editor, &GridEditor::decalPlaced, this, &MainWindow::onDecalPlaced);
+        connect(editor, &GridEditor::cameraPlaced, this, &MainWindow::onCameraPlaced);
+        
+        m_tabWidget->addTab(editor, QFileInfo(filename).fileName());
+        m_tabWidget->setCurrentWidget(editor);
+        
+        addToRecentMaps(filename);
+        updateSectorList();
+        updateWindowTitle();
+        updateVisualMode();
+        
+        // Auto-load FPG with same base name if it exists
+        QFileInfo mapInfo(filename);
+        QString baseName = mapInfo.completeBaseName();
+        QString mapDir = mapInfo.absolutePath();
+        
+        QStringList fpgPaths;
+        fpgPaths << mapDir + "/" + baseName + ".fpg";
+        fpgPaths << mapDir + "/" + baseName + ".map";
+        
+        if (m_projectManager && !m_projectManager->getProjectPath().isEmpty()) {
+            QString projectPath = m_projectManager->getProjectPath();
+            fpgPaths << projectPath + "/assets/fpg/" + baseName + ".fpg";
+            fpgPaths << projectPath + "/assets/fpg/" + baseName + ".map";
+        }
+        
+        bool fpgLoaded = false;
+        for (const QString &fpgPath : fpgPaths) {
+            if (QFile::exists(fpgPath)) {
+                qDebug() << "Auto-loading FPG:" << fpgPath;
+                
+                QVector<TextureEntry> textures;
+                bool success = FPGLoader::loadFPG(fpgPath, textures, 
+                    [this](int current, int total, const QString &name) {
+                        m_statusLabel->setText(tr("Loading FPG: %1/%2 - %3")
+                                              .arg(current).arg(total).arg(name));
+                        qApp->processEvents();
+                    });
+                
+                if (success) {
+                    m_textureCache.clear();
+                    for (const TextureEntry &entry : textures) {
+                        m_textureCache[entry.id] = entry.pixmap;
+                    }
+                    
+                    editor->setTextures(m_textureCache);
+                    
+                    addToRecentFPGs(fpgPath);
+                    m_currentFPGPath = fpgPath;
+                    fpgLoaded = true;
+                    qDebug() << "Auto-loaded FPG:" << fpgPath << "with" << textures.size() << "textures";
+                }
+                break;
+            }
+        }
+        
+        if (fpgLoaded) {
+            m_statusLabel->setText(tr("Mapa y FPG cargados: %1").arg(filename));
+        } else {
+            m_statusLabel->setText(tr("Mapa cargado: %1").arg(filename));
+        }
+    } else {
+        delete editor;
+        QMessageBox::critical(const_cast<MainWindow*>(this), tr("Error"), tr("No se pudo cargar el mapa %1").arg(filename));
+    }
+}
+
+/* ============================================================================
+   CODE EDITOR INTEGRATION
+   ============================================================================ */
+
+void MainWindow::onOpenCodeEditor(const QString &filePath)
+{
+    if (!m_codeEditorDialog) {
+        m_codeEditorDialog = new CodeEditorDialog(this);
+    }
+    
+    m_codeEditorDialog->show();
+    m_codeEditorDialog->raise();
+    m_codeEditorDialog->activateWindow();
+    
+    if (!filePath.isEmpty()) {
+        m_codeEditorDialog->openFile(filePath);
+    }
+}
+
+void MainWindow::onCodePreviewOpenRequested(const QString &filePath)
+{
+    onOpenCodeEditor(filePath);
+}
+
+

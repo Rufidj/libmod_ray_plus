@@ -133,6 +133,22 @@ struct SpawnFlag {
 };
 
 /* ============================================================================
+   ENTITY INSTANCE - For process generation
+   ============================================================================ */
+
+struct EntityInstance {
+    QString processName;
+    QString assetPath;
+    QString type;
+    int spawn_id;
+    float x, y, z;
+    
+    EntityInstance() : spawn_id(0), x(0), y(0), z(0) {}
+    EntityInstance(const QString &pname, const QString &asset, const QString &t, int id, float px, float py, float pz)
+        : processName(pname), assetPath(asset), type(t), spawn_id(id), x(px), y(py), z(pz) {}
+};
+
+/* ============================================================================
    DECAL - Overlay texture for floors/ceilings
    ============================================================================ */
 
@@ -200,6 +216,9 @@ struct MapData {
     
     /* Decals */
     QVector<Decal> decals;
+
+    /* Entities (MD3 Models) */
+    QVector<EntityInstance> entities;
     
     /* Sector Groups */
     QVector<SectorGroup> sectorGroups;
@@ -298,6 +317,18 @@ struct MapData {
         int maxId = -1;
         for (const Decal &d : decals) {
             if (d.id > maxId) maxId = d.id;
+        }
+        return maxId + 1;
+    }
+
+    /* Helper: Get next unified ID for SpawnFlags and Entities */
+    int getNextSpawnEntityId() const {
+        int maxId = 0;
+        for (const SpawnFlag &f : spawnFlags) {
+            if (f.flagId > maxId) maxId = f.flagId;
+        }
+        for (const EntityInstance &e : entities) {
+            if (e.spawn_id > maxId) maxId = e.spawn_id;
         }
         return maxId + 1;
     }

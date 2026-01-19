@@ -1,0 +1,36 @@
+// Add to MainWindow constructor after setupUI():
+
+    // Setup Build System
+    setupBuildSystem();
+    
+    // Add Build & Run toolbar
+    QToolBar *buildToolbar = addToolBar(tr("Build"));
+    buildToolbar->setObjectName("BuildToolbar");
+    
+    QAction *buildAction = buildToolbar->addAction(QIcon::fromTheme("system-run"), tr("Build"));
+    connect(buildAction, &QAction::triggered, this, &MainWindow::onBuildProject);
+    
+    QAction *runAction = buildToolbar->addAction(QIcon::fromTheme("media-playback-start"), tr("Run"));
+    connect(runAction, &QAction::triggered, this, &MainWindow::onRunProject);
+    
+    QAction *buildAndRunAction = buildToolbar->addAction(QIcon::fromTheme("system-run"), tr("Build & Run"));
+    buildAndRunAction->setShortcut(QKeySequence(Qt::Key_F5));
+    connect(buildAndRunAction, &QAction::triggered, this, &MainWindow::onBuildAndRun);
+    
+    buildToolbar->addSeparator();
+    
+    QAction *stopAction = buildToolbar->addAction(QIcon::fromTheme("process-stop"), tr("Stop"));
+    stopAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F5));
+    connect(stopAction, &QAction::triggered, this, &MainWindow::onStopRunning);
+    
+    // Add to Project menu
+    m_projectMenu->addSeparator();
+    m_projectMenu->addAction(buildAndRunAction);
+    m_projectMenu->addAction(buildAction);
+    m_projectMenu->addAction(runAction);
+    m_projectMenu->addAction(stopAction);
+    
+    // Add Install BennuGD2 to Help menu (create if doesn't exist)
+    QMenu *helpMenu = menuBar()->addMenu(tr("Help"));
+    QAction *installBennuGD2Action = helpMenu->addAction(tr("Install BennuGD2..."));
+    connect(installBennuGD2Action, &QAction::triggered, this, &MainWindow::onInstallBennuGD2);

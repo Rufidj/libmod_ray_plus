@@ -52,6 +52,47 @@ void FPGEditor::setupUI()
     // Buttons
     QHBoxLayout *buttonLayout = new QHBoxLayout();
     
+    QPushButton *newButton = new QPushButton(tr("Nuevo FPG"));
+    connect(newButton, &QPushButton::clicked, this, [this]() {
+        // Check for unsaved changes
+        if (m_isModified) {
+            QMessageBox::StandardButton reply = QMessageBox::question(this,
+                tr("Cambios sin Guardar"),
+                tr("Hay cambios sin guardar. ¿Continuar de todos modos?"),
+                QMessageBox::Yes | QMessageBox::No);
+            
+            if (reply == QMessageBox::No) {
+                return;
+            }
+        }
+        
+        // Clear everything
+        m_textures.clear();
+        m_textureMap.clear();
+        m_fpgPath.clear();
+        m_selectedTextureId = -1;
+        
+        updateTextureList();
+        m_previewLabel->clear();
+        m_previewLabel->setText(tr("Ninguna textura seleccionada"));
+        m_infoLabel->clear();
+        
+        // Reset ID spinner to 1
+        m_textureIDSpinBox->setValue(1);
+        
+        // Enable save as button (for new FPG)
+        m_saveAsButton->setEnabled(true);
+        m_saveButton->setEnabled(false);
+        m_reloadButton->setEnabled(false);
+        
+        setModified(false);
+        setWindowTitle(tr("Editor de FPG - Nuevo"));
+        
+        QMessageBox::information(this, tr("Nuevo FPG"),
+                               tr("FPG vacío creado. Añade texturas y usa 'Guardar Como...' para guardarlo."));
+    });
+    buttonLayout->addWidget(newButton);
+    
     QPushButton *loadButton = new QPushButton(tr("Cargar FPG..."));
     connect(loadButton, &QPushButton::clicked, this, [this]() {
         QString filename = QFileDialog::getOpenFileName(this, 
