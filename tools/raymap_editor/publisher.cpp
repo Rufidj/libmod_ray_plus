@@ -9,6 +9,9 @@
 #include <QStandardPaths>
 #include <QRegularExpression>
 #include <QDirIterator>
+#include <QImage>
+#include <QPainter>
+#include <QColor>
 
 Publisher::Publisher(QObject *parent) : QObject(parent)
 {
@@ -67,48 +70,101 @@ bool Publisher::publishLinux(const ProjectData &project, const PublishConfig &co
     QDir assetsDir(distDir + "/assets");
     assetsDir.mkpath(".");
     
-    // 1. Compile Game
-    emit progress(20, "Compilando código (bgdc)...");
+    // Find runtime directory (for bgdi and libs)
+    QString appDir = QCoreApplication::applicationDirPath();
+    QDir searchDir(appDir);
+    QString runtimeDir;
     
-    QString compilerPath = QCoreApplication::applicationDirPath() + "/bgdc"; // Assuming bundled
-    QString dcbPath = distDir + "/" + baseName + ".dcb"; // Or just game.dcb
+    for (int i = 0; i < 4; i++) {
+        QString candidate = searchDir.absoluteFilePath("runtime/linux-gnu");
+        if (QDir(candidate).exists()) {
+            runtimeDir = candidate;
+            qDebug() << "Found runtime dir:" << runtimeDir;
+            break;
+        }
+        searchDir.cdUp();
+    }
     
-    // We need to compile src/main.prg
-    QProcess compiler;
-    compiler.setWorkingDirectory(project.path);
-    QStringList args;
-    args << project.mainScript;
-    args << "-o" << dcbPath;
+    // 1. Copy Compiled Game (.dcb)
+    emit progress(20, "Buscando binario compilado...");
     
-    compiler.start(compilerPath, args);
-    if (!compiler.waitForFinished()) {
-        emit finished(false, "Error al ejecutar compilador (bgdc).");
+    // Determine source DCB path based on mainScript
+    QFileInfo scriptInfo(project.path + "/" + project.mainScript);
+    QString dcbName = scriptInfo.baseName() + ".dcb";
+    QString sourceDcbPath = scriptInfo.absolutePath() + "/" + dcbName;
+    
+    if (!QFile::exists(sourceDcbPath)) {
+        emit finished(false, "No se encontró el archivo compilado (.dcb).\n"
+                             "Por favor, compila el proyecto en el editor antes de publicar.\n"
+                             "Esperado en: " + sourceDcbPath);
         return false;
     }
     
-    if (compiler.exitCode() != 0) {
-        QString error = compiler.readAllStandardError();
-        emit finished(false, "Error de compilación:\n" + error);
+    QString destDcbPath = distDir + "/" + baseName + ".dcb";
+    QFile::remove(destDcbPath);
+    if (!QFile::copy(sourceDcbPath, destDcbPath)) {
+        emit finished(false, "Error al copiar el archivo compilado (.dcb).");
         return false;
     }
+    
+    qDebug() << "Copied DCB from" << sourceDcbPath << "to" << destDcbPath;
     
     // 2. Copy Binaries
     emit progress(40, "Copiando binarios y librerías...");
     
-    QString bgdiPath = QCoreApplication::applicationDirPath() + "/bgdi";
+    // Find bgdi in runtime directory first, then PATH
+    QString bgdiPath;
+    
+    if (!runtimeDir.isEmpty()) {
+        QString candidate = runtimeDir + "/bgdi";
+        if (QFile::exists(candidate)) {
+            bgdiPath = candidate;
+            qDebug() << "Using bundled bgdi from runtime:" << bgdiPath;
+        }
+    }
+    
+    if (bgdiPath.isEmpty()) {
+        // Try system PATH
+        bgdiPath = QStandardPaths::findExecutable("bgdi");
+        if (bgdiPath.isEmpty()) {
+            bgdiPath = appDir + "/bgdi";
+            if (!QFile::exists(bgdiPath)) {
+                emit finished(false, "No se encontró el intérprete bgdi.\n"
+                                     "Se buscó en 'runtime/linux-gnu/bgdi' y en el PATH.");
+                return false;
+            }
+        }
+    }
+    
     QFile::copy(bgdiPath, distDir + "/" + baseName); // Rename executable
     QFile(distDir + "/" + baseName).setPermissions(QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther | QFile::ReadOwner | QFile::ReadGroup | QFile::ReadOther);
     
-    // Copy runtime libs (.so)
-    QDir binDir(QCoreApplication::applicationDirPath());
-    QStringList filters;
-    filters << "*.so*";
-    QFileInfoList libs = binDir.entryInfoList(filters, QDir::Files);
-    
-    for (const QFileInfo &lib : libs) {
-        // Check if it's a bennu lib or system lib we want
-        // For simplicity, copy all .so in bin directory (assuming standalone build)
-        QFile::copy(lib.absoluteFilePath(), libDir.filePath(lib.fileName()));
+    // Copy runtime libs (.so) from runtime directory or system
+    if (!runtimeDir.isEmpty() && QDir(runtimeDir).exists()) {
+        QDir runtimeLibDir(runtimeDir);
+        qDebug() << "Copying libraries from runtime directory:" << runtimeDir;
+        QStringList filters;
+        filters << "*.so*";
+        QFileInfoList runtimeLibs = runtimeLibDir.entryInfoList(filters, QDir::Files);
+        
+        for (const QFileInfo &lib : runtimeLibs) {
+            QString destPath = libDir.filePath(lib.fileName());
+            QFile::remove(destPath); // Remove if exists
+            if (QFile::copy(lib.absoluteFilePath(), destPath)) {
+                qDebug() << "Copied runtime lib:" << lib.fileName();
+            }
+        }
+    } else {
+        qDebug() << "Runtime directory not found, trying application directory";
+        // Fallback: copy from application directory
+        QDir binDir(QCoreApplication::applicationDirPath());
+        QStringList filters;
+        filters << "*.so*";
+        QFileInfoList libs = binDir.entryInfoList(filters, QDir::Files);
+        
+        for (const QFileInfo &lib : libs) {
+            QFile::copy(lib.absoluteFilePath(), libDir.filePath(lib.fileName()));
+        }
     }
     
     // 3. Copy Assets
@@ -137,6 +193,11 @@ bool Publisher::publishLinux(const ProjectData &project, const PublishConfig &co
         
         // AppDir Structure
         QString appDir = config.outputPath + "/AppDir";
+        
+        // Clean previous AppDir to avoid stale files
+        QDir cleanAppDir(appDir);
+        if (cleanAppDir.exists()) cleanAppDir.removeRecursively();
+        
         QDir().mkpath(appDir + "/usr/bin");
         QDir().mkpath(appDir + "/usr/lib");
         QDir().mkpath(appDir + "/usr/share/icons/hicolor/256x256/apps");
@@ -149,6 +210,9 @@ bool Publisher::publishLinux(const ProjectData &project, const PublishConfig &co
         QFile::copy(distDir + "/" + baseName, appDir + "/usr/bin/" + baseName);
         QFile(appDir + "/usr/bin/" + baseName).setPermissions(QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther | QFile::ReadOwner | QFile::ReadGroup | QFile::ReadOther);
         
+        // Copy DCB to AppDir/usr/bin
+        QFile::copy(distDir + "/" + baseName + ".dcb", appDir + "/usr/bin/" + baseName + ".dcb");
+
         // 2. Copy Libs
         copyDir(libDir.absolutePath(), appDir + "/usr/lib");
         
@@ -184,15 +248,32 @@ bool Publisher::publishLinux(const ProjectData &project, const PublishConfig &co
             out << "Exec=" << baseName << "\n";
             out << "Icon=" << baseName << "\n";
             out << "Categories=Game;\n";
+            out << "Terminal=false\n";
             desktop.close();
         }
         
         // 6. Icon
+        QString iconDest = appDir + "/" + baseName + ".png";
+        QString dirIconDest = appDir + "/.DirIcon";
+        
         if (!config.iconPath.isEmpty() && QFile::exists(config.iconPath)) {
-             QFile::copy(config.iconPath, appDir + "/" + baseName + ".png");
-             QFile::copy(config.iconPath, appDir + "/.DirIcon");
+             QFile::copy(config.iconPath, iconDest);
+             QFile::copy(config.iconPath, dirIconDest);
         } else {
-             // Fallback icon?
+             // Fallback: Create a simple colored pixmap as icon
+             QImage dummyIcon(256, 256, QImage::Format_ARGB32);
+             dummyIcon.fill(QColor(42, 130, 218)); // Bennuish Blue
+             QPainter p(&dummyIcon);
+             p.setPen(Qt::white);
+             QFont f = p.font();
+             f.setPixelSize(100);
+             f.setBold(true);
+             p.setFont(f);
+             p.drawText(dummyIcon.rect(), Qt::AlignCenter, "B2");
+             p.end();
+             
+             dummyIcon.save(iconDest);
+             dummyIcon.save(dirIconDest);
         }
         
         // 7. Run appimagetool
@@ -206,21 +287,86 @@ bool Publisher::publishLinux(const ProjectData &project, const PublishConfig &co
             QFile::setPermissions(toolExe, QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther | QFile::ReadOwner);
         } else {
              // Check if system tool exists
-             QProcess check;
-             check.start("which", QStringList() << "appimagetool");
-             check.waitForFinished();
-             if (check.exitCode() != 0) {
+             if (QStandardPaths::findExecutable("appimagetool").isEmpty()) {
                  emit finished(true, "AppDir creado en " + appDir + ".\nInstala 'appimagetool' o configúralo para generar el archivo final.");
                  return true; 
              }
         }
         
-        appImageTool.start(toolExe, QStringList() << "AppDir" << baseName + ".AppImage");
+        // Prepare environment
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert("ARCH", "x86_64"); // Force architecture detection
+        appImageTool.setProcessEnvironment(env);
+        
+        // Ensure AppRun is executable
+        QFile(appDir + "/AppRun").setPermissions(QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther | QFile::ReadOwner | QFile::ReadGroup | QFile::ReadOther);
+        
+        // Check file size (sanity check)
+        QFileInfo toolInfo(toolExe);
+        if (toolInfo.size() < 1024 * 1024) { // Less than 1MB is suspicious
+             emit finished(false, "Error: El archivo appimagetool parece corrupto o incompleto (" + QString::number(toolInfo.size()) + " bytes).\n"
+                                  "Por favor borra " + toolExe + " y vuelve a descargarlo desde el diálogo.");
+             return false;
+        }
+
+        // Diagnosis: Check if appimagetool runs at all
+        QProcess checkRun;
+        checkRun.setProcessEnvironment(env);
+        checkRun.start(toolExe, QStringList() << "--version");
+        if (!checkRun.waitForFinished() || checkRun.exitCode() != 0) {
+             // Try running with APPIMAGE_EXTRACT_AND_RUN=1 (No FUSE needed)
+             qDebug() << "Standard execution failed. Trying APPIMAGE_EXTRACT_AND_RUN=1...";
+             
+             env.insert("APPIMAGE_EXTRACT_AND_RUN", "1");
+             appImageTool.setProcessEnvironment(env);
+             
+             // Check again
+             QProcess checkRun2;
+             checkRun2.setProcessEnvironment(env);
+             checkRun2.start(toolExe, QStringList() << "--version");
+             
+             if (!checkRun2.waitForFinished() || checkRun2.exitCode() != 0) {
+                 QString err = checkRun2.readAllStandardError(); // Read from checkRun2
+                 QString out = checkRun2.readAllStandardOutput();
+                 emit finished(false, "No se puede ejecutar appimagetool incluso sin FUSE.\n"
+                                      "Código de salida: " + QString::number(checkRun2.exitCode()) + "\n"
+                                      "Salida (stdout): " + out + "\n"
+                                      "Error (stderr): " + err + "\n\n"
+                                      "Posibles soluciones:\n"
+                                      "1. Instala libfuse2: sudo apt install libfuse2\n"
+                                      "2. Borra el archivo y redescárgalo.");
+                 return false;
+             }
+        }
+
+        // Run with --no-appstream to avoid validation errors and --verbose for debug
+        // Note: appImageTool environment might have been updated with EXTRACT_AND_RUN above
+        
+        QString finalAppImagePath = config.outputPath + "/" + baseName + ".AppImage";
+        if (QFile::exists(finalAppImagePath)) QFile::remove(finalAppImagePath);
+        
+        appImageTool.start(toolExe, QStringList() << "--no-appstream" << "--verbose" << "AppDir" << baseName + ".AppImage");
         if (appImageTool.waitForFinished() && appImageTool.exitCode() == 0) {
             // Cleanup AppDir if successful? optional.
         } else {
-             emit finished(true, "Error ejecutando appimagetool (" + toolExe + "). Revisa el directorio AppDir.");
-             return true; 
+             QString error = appImageTool.readAllStandardError();
+             QString output = appImageTool.readAllStandardOutput();
+             QString msg = "Error ejecutando appimagetool (" + toolExe + "):\n";
+             if (!error.isEmpty()) msg += error;
+             else if (!output.isEmpty()) msg += output;
+             else msg += "Código de salida: " + QString::number(appImageTool.exitCode());
+             
+             emit finished(true, msg); // Emit true so dialog stays open but warns? Or false? 
+             // If we return 'true' here, it says "Publication Successful" then shows error msg.
+             // Better emit 'false' but since the tar.gz MIGHT have succeeded...
+             // Let's emit finished with false to show the error clearly.
+             // Actually, if we are here, we might have already done tar.gz? 
+             // No, tar.gz is after this block in my code logic!
+             
+             // So if AppImage fails, we fail completely (or we should continue to tar.gz?)
+             // Let's fail for now to show the error.
+             emit finished(false, msg);
+             return false; 
         }
     } 
     
@@ -552,19 +698,28 @@ bool Publisher::publishAndroid(const ProjectData &project, const PublishConfig &
         }
     }
     
-    // 3. Compile Game (Same)
-    emit progress(60, "Compilando juego...");
-    QString compilerPath = QCoreApplication::applicationDirPath() + "/bgdc"; 
+    // 3. Copy Compile Game (.dcb)
+    emit progress(60, "Copiando binario compilado...");
+    
+    // Determine source DCB path based on mainScript
+    QFileInfo scriptInfo(project.path + "/" + project.mainScript);
+    QString dcbName = scriptInfo.baseName() + ".dcb";
+    QString sourceDcbPath = scriptInfo.absolutePath() + "/" + dcbName;
+    
+    if (!QFile::exists(sourceDcbPath)) {
+        emit finished(false, "No se encontró el archivo compilado (.dcb).\n"
+                             "Por favor, compila el proyecto en el editor antes de generar para Android.");
+        return false;
+    }
+    
     QString dcbPath = targetDir + "/app/src/main/assets/main.dcb";
     QDir().mkpath(targetDir + "/app/src/main/assets");
     
-    QProcess compiler;
-    compiler.setWorkingDirectory(project.path);
-    QStringList args;
-    args << project.mainScript;
-    args << "-o" << dcbPath;
-    compiler.start(compilerPath, args);
-    compiler.waitForFinished();
+    QFile::remove(dcbPath);
+    if (!QFile::copy(sourceDcbPath, dcbPath)) {
+        emit finished(false, "Error al copiar el archivo compilado (.dcb).");
+        return false;
+    }
     
     // 4. Copy Assets (Same)
     emit progress(70, "Copiando assets...");

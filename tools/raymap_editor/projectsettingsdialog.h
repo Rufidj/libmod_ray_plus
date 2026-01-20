@@ -42,6 +42,8 @@ private:
     
     QSpinBox *m_widthSpin;
     QSpinBox *m_heightSpin;
+    QSpinBox *m_renderWidthSpin;  // New: Internal render resolution
+    QSpinBox *m_renderHeightSpin; // New: Internal render resolution
     QSpinBox *m_fpsSpin;
     QSpinBox *m_fovSpin;
     QSpinBox *m_qualitySpin; // New

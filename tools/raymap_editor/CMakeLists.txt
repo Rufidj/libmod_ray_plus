@@ -28,6 +28,7 @@ set(PROJECT_SOURCES
     mainwindow_build.cpp
     mainwindow_project.cpp
     newprojectdialog.h newprojectdialog.cpp
+    projectsettingsdialog.h projectsettingsdialog.cpp
     consolewidget.h consolewidget.cpp
     assetbrowser.h assetbrowser.cpp
     buildmanager.h buildmanager.cpp
@@ -42,6 +43,9 @@ set(PROJECT_SOURCES
     entitypropertypanel.h entitypropertypanel.cpp
     objtomd3converter.h objtomd3converter.cpp
     objimportdialog.h objimportdialog.cpp
+    publishdialog.h publishdialog.cpp
+    publisher.h publisher.cpp
+    downloader.h downloader.cpp
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

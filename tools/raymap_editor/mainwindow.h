@@ -71,6 +71,7 @@ private slots:
     void onOpenProject();
     void onCloseProject();
     void onProjectSettings();
+    void onPublishProject();
 
     // Build System
     void onBuildProject();

@@ -187,7 +187,17 @@ void MainWindow::onGenerateCode()
     if (!m_projectManager || !m_projectManager->hasProject()) return;
 
     CodeGenerator generator;
-    generator.setProject(m_projectManager->getProject());
+    
+    // Load project configuration from file (or use defaults if not found)
+    QString projectPath = m_projectManager->getProjectPath();
+    ProjectData projectData = ProjectManager::loadProjectData(projectPath);
+    
+    // Update name and path from current project
+    const Project *proj = m_projectManager->getProject();
+    projectData.name = proj->name;
+    projectData.path = proj->path;
+    
+    generator.setProjectData(projectData);
     
     // Get current map and FPG paths
     GridEditor *editor = getCurrentEditor();

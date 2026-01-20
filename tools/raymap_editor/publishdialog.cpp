@@ -50,6 +50,16 @@ void PublishDialog::setupUI()
     pathLayout->addWidget(browseBtn);
     topLayout->addRow(tr("Carpeta de Salida:"), pathLayout);
     
+    // Icon Selection (Common for all platforms)
+    m_iconPathEdit = new QLineEdit();
+    QHBoxLayout *iconLayout = new QHBoxLayout();
+    iconLayout->addWidget(m_iconPathEdit);
+    QPushButton *iconBrowseBtn = new QPushButton("...");
+    iconLayout->addWidget(iconBrowseBtn);
+    topLayout->addRow(tr("Icono (.png):"), iconLayout);
+    
+    connect(iconBrowseBtn, &QPushButton::clicked, this, &PublishDialog::onBrowseIcon);
+    
     mainLayout->addLayout(topLayout);
 
     // Stacked Options
@@ -82,7 +92,12 @@ void PublishDialog::setupUI()
     if (!systemTool.isEmpty()) {
         m_appImageToolPath = systemTool;
     } else if (QFile::exists(localTool)) {
-        m_appImageToolPath = localTool;
+        if (QFileInfo(localTool).size() > 1024 * 1024) { // Valid if > 1MB
+            m_appImageToolPath = localTool;
+        } else {
+            // File exists but is corrupt/empty. Delete it to allow redownload.
+            QFile::remove(localTool);
+        }
     }
     
     bool hasAppImageTool = !m_appImageToolPath.isEmpty();
@@ -103,11 +118,7 @@ void PublishDialog::setupUI()
     m_packageNameEdit = new QLineEdit();
     m_packageNameEdit->setPlaceholderText("com.company.game");
     
-    m_iconPathEdit = new QLineEdit();
-    QHBoxLayout *iconLayout = new QHBoxLayout();
-    iconLayout->addWidget(m_iconPathEdit);
-    QPushButton *iconBrowseBtn = new QPushButton("...");
-    iconLayout->addWidget(iconBrowseBtn);
+    // Icon selection moved to top
     
     m_chkAndroidProject = new QCheckBox(tr("Generar Proyecto Android Studio"));
     m_chkAndroidProject->setChecked(true);
@@ -137,7 +148,7 @@ void PublishDialog::setupUI()
     apkLayout->addStretch();
     
     androidForm->addRow(tr("Package Name:"), m_packageNameEdit);
-    androidForm->addRow(tr("Icono (.png):"), iconLayout);
+    // Icon removed from here
     androidForm->addRow(m_chkAndroidProject);
     androidForm->addRow(apkLayout); // Layout with button
     
@@ -155,7 +166,9 @@ void PublishDialog::setupUI()
     optionsStack->addWidget(m_androidOptions);
     
     mainLayout->addWidget(optionsStack);
-
+    
+    // ... rest of UI setup ... (ProgressBar, Buttons)
+    
     // Progress Bar
     m_progressBar = new QProgressBar();
     m_progressBar->setVisible(false);
@@ -177,7 +190,7 @@ void PublishDialog::setupUI()
     // Connections
     connect(m_closeButton, &QPushButton::clicked, this, &QDialog::reject);
     connect(browseBtn, &QPushButton::clicked, this, &PublishDialog::onBrowseOutput);
-    connect(iconBrowseBtn, &QPushButton::clicked, this, &PublishDialog::onBrowseIcon);
+    // iconBrowseBtn connection moved up
     
     // Sync Combo with Stack
     connect(m_platformCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
@@ -222,14 +235,16 @@ void PublishDialog::onPublish()
     Publisher::PublishConfig config;
     config.platform = (Publisher::Platform)m_platformCombo->currentData().toInt();
     config.outputPath = m_outputPathEdit->text();
+    config.iconPath = m_iconPathEdit->text(); // Always set icon path
     
     if (config.platform == Publisher::Linux) {
         config.generateAppImage = m_chkLinuxAppImage->isChecked();
         config.appImageToolPath = m_appImageToolPath;
     } else if (config.platform == Publisher::Android) {
         config.packageName = m_packageNameEdit->text();
-        config.iconPath = m_iconPathEdit->text();
+        // config.iconPath set above
         config.fullProject = m_chkAndroidProject->isChecked();
+
         config.generateAPK = m_chkAndroidAPK->isChecked();
         
         // Use environment variable for NDK if set

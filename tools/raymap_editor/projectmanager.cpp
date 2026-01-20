@@ -102,3 +102,63 @@ QString ProjectManager::getProjectPath() const
     if (m_project) return m_project->path;
     return QString();
 }
+
+ProjectData ProjectManager::loadProjectData(const QString &projectPath)
+{
+    ProjectData data;
+    
+    // Set defaults
+    data.path = projectPath;
+    data.screenWidth = 800;
+    data.screenHeight = 600;
+    data.renderWidth = 800;
+    data.renderHeight = 600;
+    data.fps = 60;
+    data.fov = 90;
+    data.raycastQuality = 1;
+    data.fpgFile = "assets.fpg";
+    data.initialMap = "map.raymap";
+    data.cameraX = 384.0;
+    data.cameraY = 384.0;
+    data.cameraZ = 0.0;
+    data.cameraRot = 0.0;
+    data.cameraPitch = 0.0;
+    
+    // Try to load from config file
+    QString configPath = projectPath + "/project_config.json";
+    QFile configFile(configPath);
+    
+    if (configFile.open(QIODevice::ReadOnly)) {
+        QByteArray jsonData = configFile.readAll();
+        configFile.close();
+        
+        QJsonDocument doc = QJsonDocument::fromJson(jsonData);
+        if (!doc.isNull() && doc.isObject()) {
+            QJsonObject config = doc.object();
+            
+            // Load all values (with defaults if not present)
+            data.name = config.value("name").toString(data.name);
+            data.version = config.value("version").toString("1.0");
+            data.fpgFile = config.value("fpgFile").toString(data.fpgFile);
+            data.initialMap = config.value("initialMap").toString(data.initialMap);
+            data.screenWidth = config.value("screenWidth").toInt(data.screenWidth);
+            data.screenHeight = config.value("screenHeight").toInt(data.screenHeight);
+            data.renderWidth = config.value("renderWidth").toInt(data.renderWidth);
+            data.renderHeight = config.value("renderHeight").toInt(data.renderHeight);
+            data.fps = config.value("fps").toInt(data.fps);
+            data.fov = config.value("fov").toInt(data.fov);
+            data.raycastQuality = config.value("raycastQuality").toInt(data.raycastQuality);
+            data.cameraX = config.value("cameraX").toDouble(data.cameraX);
+            data.cameraY = config.value("cameraY").toDouble(data.cameraY);
+            data.cameraZ = config.value("cameraZ").toDouble(data.cameraZ);
+            data.cameraRot = config.value("cameraRot").toDouble(data.cameraRot);
+            data.cameraPitch = config.value("cameraPitch").toDouble(data.cameraPitch);
+            
+            qDebug() << "Loaded project configuration from" << configPath;
+        }
+    } else {
+        qDebug() << "No project configuration found at" << configPath << "- using defaults";
+    }
+    
+    return data;
+}

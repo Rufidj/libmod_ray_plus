@@ -193,6 +193,13 @@ void MainWindow::createMenus()
     QAction *projectSettingsAction = new QAction(tr("Configuración..."), this);
     connect(projectSettingsAction, &QAction::triggered, this, &MainWindow::onProjectSettings);
     projectMenu->addAction(projectSettingsAction);
+    
+    projectMenu->addSeparator();
+    
+    QAction *publishAction = new QAction(tr("Publicar..."), this);
+    publishAction->setToolTip(tr("Publicar proyecto para distribución"));
+    connect(publishAction, &QAction::triggered, this, &MainWindow::onPublishProject);
+    projectMenu->addAction(publishAction);
 
     // === FILE MENU ===
     QMenu *fileMenu = menuBar()->addMenu(tr("&Archivo"));

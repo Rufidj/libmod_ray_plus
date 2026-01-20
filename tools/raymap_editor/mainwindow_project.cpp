@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "newprojectdialog.h"
+#include "projectsettingsdialog.h"
+#include "publishdialog.h"
 #include "projectmanager.h"
 #include "assetbrowser.h"
 #include <QMessageBox>
@@ -179,7 +181,54 @@ void MainWindow::onProjectSettings()
         return;
     }
     
-    // TODO: Implement project settings dialog
-    QMessageBox::information(this, "Configuración del Proyecto",
-        "Configuración del proyecto (próximamente)");
+    // Load project configuration from file (or use defaults if not found)
+    QString projectPath = m_projectManager->getProjectPath();
+    ProjectData projectData = ProjectManager::loadProjectData(projectPath);
+    
+    // Update name and path from current project
+    const Project *proj = m_projectManager->getProject();
+    projectData.name = proj->name;
+    projectData.path = proj->path;
+    
+    // Open settings dialog
+    ProjectSettingsDialog dialog(projectData, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        // Get updated data
+        ProjectData updatedData = dialog.getProjectData();
+        
+        // The dialog already regenerated main.prg with new settings
+        // We could save the settings to a project config file here
+        
+        QMessageBox::information(this, "Configuración Guardada",
+            QString("Configuración del proyecto actualizada.\n"
+                    "Resolución de ventana: %1x%2\n"
+                    "Resolución de renderizado: %3x%4\n"
+                    "El código ha sido regenerado con los nuevos valores.")
+            .arg(updatedData.screenWidth)
+            .arg(updatedData.screenHeight)
+            .arg(updatedData.renderWidth)
+            .arg(updatedData.renderHeight));
+    }
+}
+
+void MainWindow::onPublishProject()
+{
+    if (!m_projectManager || !m_projectManager->hasProject()) {
+        QMessageBox::information(this, "Sin Proyecto",
+            "No hay ningún proyecto abierto.\nCrea o abre un proyecto primero.");
+        return;
+    }
+    
+    // Load project configuration
+    QString projectPath = m_projectManager->getProjectPath();
+    ProjectData projectData = ProjectManager::loadProjectData(projectPath);
+    
+    // Update name and path from current project
+    const Project *proj = m_projectManager->getProject();
+    projectData.name = proj->name;
+    projectData.path = proj->path;
+    
+    // Open publish dialog
+    PublishDialog dialog(&projectData, this);
+    dialog.exec();
 }

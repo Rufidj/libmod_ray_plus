@@ -13,7 +13,7 @@ public:
     CodeGenerator();
     
     // Set project data
-    void setProject(const Project* project);
+    void setProjectData(const ProjectData &data);
     
     // Template system
     void setVariable(const QString &name, const QString &value);
@@ -27,7 +27,7 @@ public:
     QString generateEntityProcess(const QString &entityName, const QString &entityType);
     
 private:
-    const Project* m_project;
+    ProjectData m_projectData;
     QMap<QString, QString> m_variables;
     
     // Helper functions

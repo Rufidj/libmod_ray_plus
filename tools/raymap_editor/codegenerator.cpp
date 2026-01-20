@@ -4,30 +4,31 @@
 #include <QDebug>
 
 CodeGenerator::CodeGenerator()
-    : m_project(nullptr)
 {
 }
 
-void CodeGenerator::setProject(const Project* project)
+void CodeGenerator::setProjectData(const ProjectData &data)
 {
-    m_project = project;
+    m_projectData = data;
     
-    if (m_project) {
-        setVariable("PROJECT_NAME", m_project->name);
-        setVariable("SCREEN_WIDTH", "1024");
-        setVariable("SCREEN_HEIGHT", "768");
-        setVariable("FPS", "60");
-        setVariable("FOV", "60");
-        setVariable("RAYCAST_QUALITY", "2");
-        setVariable("FPG_PATH", "assets.fpg");
-        setVariable("INITIAL_MAP", "map.wld");
-        setVariable("CAM_X", "384");
-        setVariable("CAM_Y", "384");
-        setVariable("CAM_Z", "0");
-        setVariable("CAM_ROT", "0");
-        setVariable("CAM_PITCH", "0");
-        setVariable("DATE", QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
-    }
+    // Set all variables from project data
+    setVariable("PROJECT_NAME", m_projectData.name);
+    setVariable("PROJECT_VERSION", m_projectData.version);
+    setVariable("SCREEN_WIDTH", QString::number(m_projectData.screenWidth));
+    setVariable("SCREEN_HEIGHT", QString::number(m_projectData.screenHeight));
+    setVariable("RENDER_WIDTH", QString::number(m_projectData.renderWidth));
+    setVariable("RENDER_HEIGHT", QString::number(m_projectData.renderHeight));
+    setVariable("FPS", QString::number(m_projectData.fps));
+    setVariable("FOV", QString::number(m_projectData.fov));
+    setVariable("RAYCAST_QUALITY", QString::number(m_projectData.raycastQuality));
+    setVariable("FPG_PATH", m_projectData.fpgFile.isEmpty() ? "assets.fpg" : m_projectData.fpgFile);
+    setVariable("INITIAL_MAP", m_projectData.initialMap.isEmpty() ? "map.raymap" : m_projectData.initialMap);
+    setVariable("CAM_X", QString::number(m_projectData.cameraX));
+    setVariable("CAM_Y", QString::number(m_projectData.cameraY));
+    setVariable("CAM_Z", QString::number(m_projectData.cameraZ));
+    setVariable("CAM_ROT", QString::number(m_projectData.cameraRot));
+    setVariable("CAM_PITCH", QString::number(m_projectData.cameraPitch));
+    setVariable("DATE", QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
 }
 
 void CodeGenerator::setVariable(const QString &name, const QString &value)
@@ -50,8 +51,8 @@ QString CodeGenerator::processTemplate(const QString &templateText)
 
 QString CodeGenerator::generateMainPrg()
 {
-    if (!m_project) {
-        qWarning() << "No project set for code generation";
+    if (m_projectData.name.isEmpty()) {
+        qWarning() << "No project data set for code generation";
         return "";
     }
     
@@ -134,7 +135,8 @@ QString CodeGenerator::getMainTemplate()
         "    end\n"
         "\n"
         "    // Inicializar motor raycasting\n"
-        "    if (RAY_INIT(screen_w, screen_h, {{FOV}}, {{RAYCAST_QUALITY}}) == 0)\n"
+        "    // Usa resolución de renderizado interna (puede ser menor que la ventana para mejor rendimiento)\n"
+        "    if (RAY_INIT({{RENDER_WIDTH}}, {{RENDER_HEIGHT}}, {{FOV}}, {{RAYCAST_QUALITY}}) == 0)\n"
         "        say(\"ERROR: No se pudo inicializar motor\");\n"
         "        exit();\n"
         "    end\n"
@@ -238,8 +240,8 @@ QString CodeGenerator::getEnemyTemplate()
 
 QString CodeGenerator::generateMainPrgWithEntities(const QVector<EntityInstance> &entities)
 {
-    if (!m_project) {
-        qWarning() << "No project set for code generation";
+    if (m_projectData.name.isEmpty()) {
+        qWarning() << "No project data set for code generation";
         return "";
     }
     

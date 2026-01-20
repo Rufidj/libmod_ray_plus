@@ -30,7 +30,6 @@ private:
     QDoubleSpinBox *m_scaleSpin;
     QCheckBox *m_atlasCheck;
     QSpinBox *m_atlasSizeSpin;
-    QSpinBox *m_decimateSpin;
 };
 
 #endif // OBJIMPORTDIALOG_H

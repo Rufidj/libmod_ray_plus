@@ -56,6 +56,8 @@ bool ObjToMd3Converter::loadMtl(const QString &filename)
             QString rawPath = parts.mid(1).join(" ");
             rawPath.replace("\\", "/"); // Normalize slashes
             
+            qDebug() << "MTL: Processing map_Kd for material" << currentMatName << "- raw path:" << rawPath;
+            
             QFileInfo fiMtl(filename);
             QString absPath = fiMtl.absolutePath() + "/" + rawPath;
             bool found = false;
@@ -64,6 +66,7 @@ bool ObjToMd3Converter::loadMtl(const QString &filename)
             if (QFile::exists(absPath)) {
                 m_materials[currentMatName].texturePath = absPath;
                 found = true;
+                qDebug() << "  ✓ Found texture at:" << absPath;
             } 
             
             // 2. Try just the filename in the same dir (ignoring folders in mtl)
@@ -73,6 +76,7 @@ bool ObjToMd3Converter::loadMtl(const QString &filename)
                 if (QFile::exists(tryPath)) {
                     m_materials[currentMatName].texturePath = tryPath;
                     found = true;
+                    qDebug() << "  ✓ Found texture (filename only) at:" << tryPath;
                 }
             }
             
@@ -84,12 +88,14 @@ bool ObjToMd3Converter::loadMtl(const QString &filename)
                  if (QFile::exists(tryPath)) {
                      m_materials[currentMatName].texturePath = tryPath;
                      found = true;
+                     qDebug() << "  ✓ Found texture (last part) at:" << tryPath;
                  }
             }
             
             if (!found) {
                 // Keep the raw path as fallback, maybe it works relative to CWD eventually
                 m_materials[currentMatName].texturePath = rawPath;
+                qDebug() << "  ✗ Texture NOT found, keeping raw path:" << rawPath;
             }
         }
     }
@@ -414,6 +420,8 @@ bool ObjToMd3Converter::loadGlb(const QString &filename)
                     m_finalTexCoords.append(QVector2D(0.5f, 0.5f));
                 }
             }
+
+            qDebug() << "GLB Primitive: loaded" << vCount << "vertices, baseIndex:" << baseVertexIndex;
             
             // Load Indices (Triangles)
             if (indicesIdx >= 0) {
@@ -444,6 +452,8 @@ bool ObjToMd3Converter::loadGlb(const QString &filename)
                     m_triangles.append(tri);
                     m_faceMaterialIndices.append(matIdx);
                 }
+                
+                qDebug() << "  Loaded" << (iCount/3) << "triangles, index range:" << baseVertexIndex << "to" << (m_finalVertices.size()-1);
             }
         }
     }
@@ -560,39 +570,84 @@ bool ObjToMd3Converter::saveMd3(const QString &filename, float scale)
 
 bool ObjToMd3Converter::generateTextureAtlas(const QString &outputPath, int size)
 {
-    if (m_finalTexCoords.isEmpty()) return false;
+    if (m_finalTexCoords.isEmpty()) {
+        qDebug() << "Atlas generation skipped: No UVs";
+        return false;
+    }
+    
+    qDebug() << "Generating texture atlas:" << outputPath << "size:" << size;
+    qDebug() << "  Materials:" << m_materials.size() << "Triangles:" << m_triangles.size();
+    
+    // PRE-LOAD all external textures before the loop
+    int texturesLoaded = 0;
+    int texturesFailed = 0;
+    QVector<QString> loadedTexturePaths;
+    
+    for (auto it = m_materials.begin(); it != m_materials.end(); ++it) {
+        ObjMaterial &mat = it.value();
+        
+        // Skip if already has embedded texture
+        if (mat.hasTexture) {
+            qDebug() << "  Material" << mat.name << "has embedded texture, size:" << mat.textureImage.size();
+            loadedTexturePaths.append(mat.name + "_embedded");
+            continue;
+        }
+        
+        // Try to load external texture
+        if (!mat.texturePath.isEmpty() && QFile::exists(mat.texturePath)) {
+            qDebug() << "  Loading texture for material" << mat.name << "from:" << mat.texturePath;
+            
+            if (mat.textureImage.load(mat.texturePath)) {
+                mat.hasTexture = true;
+                texturesLoaded++;
+                loadedTexturePaths.append(mat.texturePath);
+                qDebug() << "    ✓ Loaded successfully, size:" << mat.textureImage.size();
+            } else {
+                texturesFailed++;
+                qDebug() << "    ✗ Failed to load image file";
+            }
+        } else if (!mat.texturePath.isEmpty()) {
+            qDebug() << "  Material" << mat.name << "texture path does not exist:" << mat.texturePath;
+        }
+    }
+    
+    qDebug() << "Pre-load complete. Textures loaded:" << texturesLoaded << "failed:" << texturesFailed;
+    
+    // For single texture OBJ: simply draw the texture scaled to atlas size
+    // The UVs already map correctly to the texture
+    if (texturesLoaded == 1 && m_materials.size() == 1) {
+        ObjMaterial &mat = m_materials.first();
+        if (mat.hasTexture && !mat.textureImage.isNull()) {
+            qDebug() << "Single texture detected, drawing to atlas at full resolution";
+            
+            // Simply draw the texture scaled to the atlas size
+            QImage atlas = mat.textureImage.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            
+            bool saved = atlas.save(outputPath);
+            qDebug() << "Atlas saved:" << saved;
+            return saved;
+        }
+    }
+    
+    // Multiple materials: need proper UV baking
+    qDebug() << "Multiple materials, using UV-based baking";
     
     QImage image(size, size, QImage::Format_ARGB32);
-    image.fill(QColor(128, 128, 128)); // Gray background like Python script
+    image.fill(QColor(128, 128, 128));
     
     QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing, false); // Disable AA for crisp edges
+    painter.setRenderHint(QPainter::Antialiasing, false);
     
-    // Bake triangles using UVs
+    // Draw each triangle with its material color
     for (int i = 0; i < m_triangles.size(); ++i) {
         const Md3Triangle &tri = m_triangles[i];
         int matIdx = (i < m_faceMaterialIndices.size()) ? m_faceMaterialIndices[i] : -1;
         
         QColor color = Qt::gray;
-        QImage texImage;
-        bool hasTexture = false;
         
         if (matIdx >= 0 && matIdx < m_materialNames.size()) {
             ObjMaterial &mat = m_materials[m_materialNames[matIdx]];
             color = mat.color;
-            if (mat.hasTexture) {
-                texImage = mat.textureImage;
-                hasTexture = true;
-            } else if (!mat.texturePath.isEmpty()) {
-                if (!mat.hasTexture && QFile::exists(mat.texturePath)) {
-                    mat.textureImage.load(mat.texturePath);
-                    mat.hasTexture = !mat.textureImage.isNull();
-                }
-                if (mat.hasTexture) {
-                    texImage = mat.textureImage;
-                    hasTexture = true;
-                }
-            }
         }
         
         QVector2D uv1 = m_finalTexCoords[tri.indices[0]];
@@ -605,32 +660,13 @@ bool ObjToMd3Converter::generateTextureAtlas(const QString &outputPath, int size
             QPointF(uv3.x() * size, (1.0f - uv3.y()) * size)
         };
         
-        if (hasTexture) {
-            painter.save();
-            QPainterPath path;
-            path.addPolygon(QPolygonF() << points[0] << points[1] << points[2]);
-            painter.setClipPath(path);
-            
-            // Map full texture to full atlas rect, clipped to triangle
-            // This assumes UVs are consistent between source texture and atlas
-            QRectF targetRect(0, 0, size, size);
-            painter.drawImage(targetRect, texImage);
-            
-            painter.restore();
-        } else {
-            // Color fallback
-            if (color.alpha() == 0) color.setAlpha(255);
-            painter.setBrush(color);
-            painter.setPen(QPen(color, 1.0)); // Fill gaps
-            painter.drawPolygon(points, 3);
-        }
-        
-        // Wireframe overlay for visibility
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(QColor(0, 0, 0, 60), 1.0)); // Semi-transparent black
+        if (color.alpha() == 0) color.setAlpha(255);
+        painter.setBrush(color);
+        painter.setPen(QPen(color, 1.0));
         painter.drawPolygon(points, 3);
     }
     
+    qDebug() << "Atlas baking complete, saving to:" << outputPath;
     return image.save(outputPath);
 }
 

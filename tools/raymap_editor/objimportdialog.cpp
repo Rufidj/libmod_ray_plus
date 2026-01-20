@@ -49,17 +49,9 @@ ObjImportDialog::ObjImportDialog(QWidget *parent) : QDialog(parent)
     m_atlasSizeSpin->setValue(1024);
     m_atlasSizeSpin->setSingleStep(128);
     m_atlasSizeSpin->setSuffix(" px");
-    
-    m_decimateSpin = new QSpinBox();
-    m_decimateSpin->setRange(100, 20000);
-    m_decimateSpin->setValue(2000); 
-    m_decimateSpin->setSuffix(" tris");
-    m_decimateSpin->setToolTip("Reducir triangulos si excede este numero");
 
     optionsLayout->addWidget(new QLabel(tr("Escala:")));
     optionsLayout->addWidget(m_scaleSpin);
-    optionsLayout->addWidget(new QLabel(tr("Max Tris:")));
-    optionsLayout->addWidget(m_decimateSpin);
     optionsLayout->addWidget(new QLabel(tr("Tam. Atlas:")));
     optionsLayout->addWidget(m_atlasSizeSpin);
     optionsLayout->addStretch();
@@ -142,17 +134,11 @@ void ObjImportDialog::convert()
         return;
     }
     
-    // Auto-decimate using UI Value
-    int maxTris = m_decimateSpin->value();
-    if (converter.triangleCount() > maxTris) {
-        // Recalculate progress for decimate phase (60-80 range)
-        progress.setLabelText("Reduciendo poligonos...");
-        converter.decimate(maxTris);
-    }
     
-    // Prepare atlas path based on output name
-    QFileInfo fi(outPath);
-    QString atlasPath = fi.absolutePath() + "/" + fi.completeBaseName() + ".png";
+    // Prepare atlas path based on INPUT file name (not output MD3)
+    QFileInfo fiInput(inPath);
+    QFileInfo fiOutput(outPath);
+    QString atlasPath = fiOutput.absolutePath() + "/" + fiInput.completeBaseName() + ".png";
     bool atlasCreated = false;
 
     // Merge textures if multiple materials found (GLB)
@@ -179,7 +165,7 @@ void ObjImportDialog::convert()
     
     QString msg = tr("Conversión completada con éxito!\n") + converter.debugInfo();
     if (atlasCreated) {
-        msg += "\nAtlas texture: " + fi.completeBaseName() + ".png";
+        msg += "\nAtlas texture: " + fiInput.completeBaseName() + ".png";
     }
 }
 
