@@ -135,10 +135,6 @@ typedef struct {
     int wall_id_a, wall_id_b;           /* IDs de paredes en cada sector */
     float x1, y1, x2, y2;               /* Segmento del portal en world space */
     
-    /* BUILD ENGINE: Portal height range (min ceiling, max floor of both sectors) */
-    float floor_z;                      /* Portal floor height */
-    float ceiling_z;                    /* Portal ceiling height */
-    
     /* Clipping Information (calculado durante rendering) */
     int screen_x1, screen_x2;           /* Rango de columnas en pantalla */
     int screen_y1_top, screen_y2_top;   /* Límite superior */
@@ -181,28 +177,6 @@ typedef struct {
     float interpolation;                /* Factor de interpolación entre frames (0.0 - 1.0) */
     float model_scale;                  /* Factor de escala del modelo (1.0 = normal, 10.0 = 10x más grande) */
 } RAY_Sprite;
-
-/* ============================================================================
-   DECALS - Overlay textures for floors/ceilings
-   ============================================================================ */
-
-typedef struct {
-    int id;                             /* Unique decal ID */
-    int sector_id;                      /* Sector this decal belongs to */
-    int is_floor;                       /* 1 = floor, 0 = ceiling */
-    
-    /* Position and size (world coordinates) */
-    float x, y;                         /* Center position */
-    float width, height;                /* Dimensions */
-    float rotation;                     /* Rotation in radians */
-    
-    /* Texture */
-    int texture_id;                     /* Texture ID from FPG */
-    
-    /* Rendering */
-    float alpha;                        /* Transparency (0.0-1.0) */
-    int render_order;                   /* Render order (higher = on top) */
-} RAY_Decal;
 
 /* ============================================================================
    SPAWN FLAGS - Posiciones de spawn para sprites
@@ -304,11 +278,6 @@ typedef struct {
     RAY_SpawnFlag *spawn_flags;
     int num_spawn_flags;
     int spawn_flags_capacity;
-    
-    /* Decals */
-    RAY_Decal *decals;
-    int num_decals;
-    int decals_capacity;
     
     /* FPG de texturas */
     int fpg_id;
@@ -456,9 +425,6 @@ int ray_save_map_v9(const char *filename);
 int ray_load_map_v8(const char *filename);
 int ray_save_map_v8(const char *filename);
 
-/* Decal baking */
-void ray_bake_decals(void);  /* Bake decals into floor/ceiling textures */
-
 
 /* ============================================================================
    FUNCIONES INTERNAS - Raycasting
@@ -498,9 +464,5 @@ void ray_clip_window_clip_to_portal(RAY_ClipWindow *window, RAY_Portal *portal);
 float ray_screen_distance(float screenWidth, float fovRadians);
 float ray_strip_angle(float screenX, float screenDistance);
 float ray_strip_screen_height(float screenDistance, float correctDistance, float height);
-
-/* Decal Rendering */
-void render_decal(GRAPH *dest, RAY_Decal *decal, RAY_Sector *sector);
-void render_sector_decals(GRAPH *dest, int sector_id);
 
 #endif /* __LIBMOD_RAY_H */

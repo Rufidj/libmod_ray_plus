@@ -63,16 +63,6 @@ DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
     FUNC("RAY_GET_FLOOR_HEIGHT", "FF", TYPE_FLOAT, libmod_ray_get_floor_height),
     FUNC("RAY_GET_TAG_POINT", "ISPPP", TYPE_INT, libmod_ray_get_tag_point),
     FUNC("RAY_SET_TEXTURE_QUALITY", "I", TYPE_INT, libmod_ray_set_texture_quality),
-    
-    // Cámaras cinemáticas
-    FUNC("RAY_CAMERA_LOAD", "S", TYPE_INT, libmod_ray_camera_load),
-    FUNC("RAY_CAMERA_CREATE_TEST", "", TYPE_INT, libmod_ray_camera_create_test),
-    FUNC("RAY_CAMERA_PLAY", "I", TYPE_INT, libmod_ray_camera_play),
-    FUNC("RAY_CAMERA_STOP", "", TYPE_INT, libmod_ray_camera_stop),
-    FUNC("RAY_CAMERA_PAUSE", "", TYPE_INT, libmod_ray_camera_pause),
-    FUNC("RAY_CAMERA_IS_PLAYING", "", TYPE_INT, libmod_ray_camera_is_playing),
-    FUNC("RAY_CAMERA_UPDATE", "F", TYPE_INT, libmod_ray_camera_update),
-    
     FUNC(NULL, NULL, 0, NULL)
 };
 

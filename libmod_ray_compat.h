@@ -49,10 +49,9 @@ static inline int ray_wall_is_portal(RAY_Wall *wall) {
 static inline int ray_sector_is_solid(RAY_Sector *sector) {
     if (!sector) return 0;
     
-    // CRITICAL FIX: Detect solid sectors (buildings, boxes, columns)
-    // A sector is solid if it has a parent (nested sector)
-    // This enables proper rendering with lids/caps via render_solid_sector
-    return (sector->parent_sector_id >= 0);
+    // BUILD_ENGINE: No solid sectors - all sectors are navigable spaces
+    // The concept of "solid" was part of the artificial hierarchy
+    return 0;
 }
 
 /**

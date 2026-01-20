@@ -5,7 +5,6 @@
 
 #include "libmod_ray.h"
 #include "libmod_ray_compat.h"
-#include "libmod_ray_camera.h"
 #include <stdlib.h>
 #include <float.h>
 #include <string.h>
@@ -1136,126 +1135,6 @@ int64_t libmod_ray_get_tag_point(INSTANCE *my, int64_t *params) {
 int64_t libmod_ray_set_texture_quality(INSTANCE *my, int64_t *params) {
     if (!g_engine.initialized) return 0;
     g_engine.texture_quality = (int)params[0];
-    return 1;
-}
-
-/* ============================================================================
-   FUNCIONES DE CÁMARAS CINEMÁTICAS
-   ============================================================================ */
-
-int64_t libmod_ray_camera_create_test(INSTANCE *my, int64_t *params) {
-    // Crear un path de prueba con 4 keyframes
-    CameraKeyframe keyframes[4];
-    
-    // Keyframe 0
-    keyframes[0].x = 100.0f;
-    keyframes[0].y = 200.0f;
-    keyframes[0].z = 64.0f;
-    keyframes[0].yaw = 0.0f;
-    keyframes[0].pitch = 0.0f;
-    keyframes[0].roll = 0.0f;
-    keyframes[0].fov = 90.0f;
-    keyframes[0].time = 0.0f;
-    keyframes[0].duration = 0.5f;
-    keyframes[0].speed_multiplier = 1.0f;
-    keyframes[0].ease_in = 0;
-    keyframes[0].ease_out = 3;
-    
-    // Keyframe 1
-    keyframes[1].x = 300.0f;
-    keyframes[1].y = 200.0f;
-    keyframes[1].z = 64.0f;
-    keyframes[1].yaw = 0.785f; // 45 grados
-    keyframes[1].pitch = 0.0f;
-    keyframes[1].roll = 0.0f;
-    keyframes[1].fov = 90.0f;
-    keyframes[1].time = 3.0f;
-    keyframes[1].duration = 1.0f;
-    keyframes[1].speed_multiplier = 1.0f;
-    keyframes[1].ease_in = 0;
-    keyframes[1].ease_out = 3;
-    
-    // Keyframe 2
-    keyframes[2].x = 300.0f;
-    keyframes[2].y = 400.0f;
-    keyframes[2].z = 128.0f;
-    keyframes[2].yaw = 1.57f; // 90 grados
-    keyframes[2].pitch = -0.2f;
-    keyframes[2].roll = 0.0f;
-    keyframes[2].fov = 75.0f;
-    keyframes[2].time = 6.0f;
-    keyframes[2].duration = 0.5f;
-    keyframes[2].speed_multiplier = 0.5f;
-    keyframes[2].ease_in = 0;
-    keyframes[2].ease_out = 3;
-    
-    // Keyframe 3
-    keyframes[3].x = 100.0f;
-    keyframes[3].y = 400.0f;
-    keyframes[3].z = 64.0f;
-    keyframes[3].yaw = 3.14f; // 180 grados
-    keyframes[3].pitch = 0.0f;
-    keyframes[3].roll = 0.0f;
-    keyframes[3].fov = 90.0f;
-    keyframes[3].time = 10.0f;
-    keyframes[3].duration = 0.0f;
-    keyframes[3].speed_multiplier = 1.0f;
-    keyframes[3].ease_in = 0;
-    keyframes[3].ease_out = 0;
-    
-    return ray_camera_create_simple_path(4, keyframes);
-}
-
-int64_t libmod_ray_camera_load(INSTANCE *my, int64_t *params) {
-    const char *filename = (const char*)string_get(params[0]);
-    int result = ray_camera_load_path(filename);
-    string_discard(params[0]);
-    return result;
-}
-
-int64_t libmod_ray_camera_play(INSTANCE *my, int64_t *params) {
-    ray_camera_play_path((int)params[0]);
-    return 0;
-}
-
-int64_t libmod_ray_camera_stop(INSTANCE *my, int64_t *params) {
-    ray_camera_stop_path();
-    return 0;
-}
-
-int64_t libmod_ray_camera_pause(INSTANCE *my, int64_t *params) {
-    ray_camera_pause_path();
-    return 0;
-}
-
-int64_t libmod_ray_camera_is_playing(INSTANCE *my, int64_t *params) {
-    return ray_camera_is_playing();
-}
-
-int64_t libmod_ray_camera_update(INSTANCE *my, int64_t *params) {
-    if (!g_engine.initialized) return 0;
-    
-    float delta = *(float*)&params[0];
-    ray_camera_update(delta);
-    
-    // Obtener estado y aplicar a cámara del motor
-    CameraState state;
-    ray_camera_get_state(&state);
-    
-    // Debug output
-    static int debug_count = 0;
-    if (debug_count++ % 60 == 0) {
-        fprintf(stderr, "APPLY CAMERA: pos=(%.1f,%.1f,%.1f) rot=%.2f pitch=%.2f\n",
-                state.x, state.y, state.z, state.yaw, state.pitch);
-    }
-    
-    // Aplicar a cámara del motor (Direct mapping: Z is height in engine)
-    g_engine.camera.x = state.x;
-    g_engine.camera.y = state.y;
-    g_engine.camera.z = state.z;
-    g_engine.camera.rot = state.yaw;
-    g_engine.camera.pitch = state.pitch;
-    
     return 1;
 }
 

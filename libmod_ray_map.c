@@ -34,7 +34,6 @@ typedef struct {
     float camera_x, camera_y, camera_z;
     float camera_rot, camera_pitch;
     int32_t skyTextureID;
-    uint32_t num_decals;        /* v10+ */
 } RAY_MapHeader_v8;
 
 /* ============================================================================
@@ -48,7 +47,7 @@ typedef struct {
 
 typedef struct {
     char magic[8];              /* "RAYMAP\x1a" */
-    uint32_t version;           /* 9 or 10 */
+    uint32_t version;           /* 9 */
     uint32_t num_sectors;
     uint32_t num_portals;
     uint32_t num_sprites;
@@ -56,7 +55,6 @@ typedef struct {
     float camera_x, camera_y, camera_z;
     float camera_rot, camera_pitch;
     int32_t skyTextureID;
-    uint32_t num_decals;        /* v10+ (0 for v9) - AFTER skyTextureID */
 } RAY_MapHeader_v9;
 
 /* ============================================================================
@@ -180,11 +178,6 @@ static void ray_detect_nested_sectors(void);
 int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     if (!file || !header) return 0;
     
-    // Initialize num_decals to 0 for v9 maps (v10 will have it set from file)
-    if (header->version == 9) {
-        header->num_decals = 0;
-    }
-    
     printf("RAY: Loading Map v9 (%d sectors)...\n", header->num_sectors);
     
     /* 1. Allocate memory */
@@ -194,10 +187,11 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
         g_engine.sectors = (RAY_Sector*)calloc(header->num_sectors, sizeof(RAY_Sector));
         g_engine.sectors_capacity = header->num_sectors;
     }
-    // Always allocate maximum portal capacity for auto-detected portals
     g_engine.num_portals = 0;
-    g_engine.portals = (RAY_Portal*)calloc(RAY_MAX_PORTALS, sizeof(RAY_Portal));
-    g_engine.portals_capacity = RAY_MAX_PORTALS;
+    if (header->num_portals > 0) {
+        g_engine.portals = (RAY_Portal*)calloc(header->num_portals, sizeof(RAY_Portal));
+        g_engine.portals_capacity = header->num_portals;
+    }
     g_engine.num_sprites = 0;
     if (header->num_sprites > 0) {
         g_engine.sprites = (RAY_Sprite*)calloc(header->num_sprites, sizeof(RAY_Sprite));
@@ -363,64 +357,7 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     }
     g_engine.num_spawn_flags = header->num_spawn_flags;
     
-    /* 7. Decals (v10+) */
-    printf("RAY: Checking for decals (num_decals=%d, version=%d)...\n", header->num_decals, header->version);
-    g_engine.num_decals = 0;
-    g_engine.decals = NULL;
-    g_engine.decals_capacity = 0;
-    
-    // Safety check: only load decals if count is reasonable
-    if (header->num_decals > 0 && header->num_decals < 10000) {
-        printf("RAY: Allocating memory for %d decals...\n", header->num_decals);
-        g_engine.decals = (RAY_Decal*)calloc(header->num_decals, sizeof(RAY_Decal));
-        if (!g_engine.decals) {
-            fprintf(stderr, "RAY: ERROR - Failed to allocate memory for decals\n");
-            header->num_decals = 0;
-        } else {
-            g_engine.decals_capacity = header->num_decals;
-        
-            for (int i = 0; i < header->num_decals; i++) {
-                RAY_Decal *d = &g_engine.decals[i];
-                fread(&d->id, sizeof(int), 1, file);
-                fread(&d->sector_id, sizeof(int), 1, file);
-            
-                uint8_t is_floor_byte;
-                fread(&is_floor_byte, sizeof(uint8_t), 1, file);
-                d->is_floor = (is_floor_byte != 0);
-            
-                fread(&d->x, sizeof(float), 1, file);
-                fread(&d->y, sizeof(float), 1, file);
-                fread(&d->width, sizeof(float), 1, file);
-                fread(&d->height, sizeof(float), 1, file);
-                fread(&d->rotation, sizeof(float), 1, file);
-                fread(&d->texture_id, sizeof(int), 1, file);
-                fread(&d->alpha, sizeof(float), 1, file);
-                fread(&d->render_order, sizeof(int), 1, file);
-            }
-            g_engine.num_decals = header->num_decals;
-            printf("RAY: Loaded %d decals\n", g_engine.num_decals);
-        }
-    } else if (header->num_decals >= 10000) {
-        fprintf(stderr, "RAY: WARNING - Suspicious decal count %d, skipping\n", header->num_decals);
-        header->num_decals = 0;
-    }
-    
-    /* 8. Reconstruct parent-child relationships */
-    printf("RAY: Reconstructing parent-child relationships...\n");
-    for (int i = 0; i < g_engine.num_sectors; i++) {
-        RAY_Sector *parent = &g_engine.sectors[i];
-        
-        for (int c = 0; c < parent->num_children; c++) {
-            int child_id = parent->child_sector_ids[c];
-            if (child_id >= 0 && child_id < g_engine.num_sectors) {
-                RAY_Sector *child = &g_engine.sectors[child_id];
-                child->parent_sector_id = parent->sector_id;
-                printf("RAY:   Set S%d parent = S%d\n", child_id, parent->sector_id);
-            }
-        }
-    }
-    
-    /* 8. Auto-detect portals (Build Engine style) */
+    /* 7. Auto-detect portals (Build Engine style) */
     printf("RAY: Auto-detecting portals between sectors...\n");
     printf("RAY: Preserving %d manual portals from file\n", g_engine.num_portals);
     
@@ -428,13 +365,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     // and add auto-detected ones for shared walls
     
     ray_detect_all_shared_walls();
-    // ray_detect_nested_sectors();  // DISABLED: Using automatic child rendering instead
+    // ray_detect_nested_sectors();  // DISABLED: Build Engine doesn't auto-create portals for nested sectors
     printf("RAY: Portal detection complete. Total portals: %d\n", g_engine.num_portals);
-    
-    /* 9. Bake decals into floor/ceiling textures */
-    if (g_engine.num_decals > 0) {
-        ray_bake_decals();
-    }
     
     return 1;
 }
@@ -513,8 +445,7 @@ static int add_wall_to_sector(RAY_Sector *sector, RAY_Wall *wall) {
 static int calculate_wall_overlap(RAY_Wall *w1, RAY_Wall *w2, 
                                    float *overlap_start_x, float *overlap_start_y,
                                    float *overlap_end_x, float *overlap_end_y) {
-    // Increased tolerance to allow small gaps between sectors (Build Engine style)
-    float epsilon = 10.0f;
+    float epsilon = 2.0f;
     
     // Check if walls are on the same vertical line
     if (fabsf(w1->x1 - w1->x2) < epsilon && fabsf(w2->x1 - w2->x2) < epsilon) {
@@ -756,10 +687,6 @@ static void ray_detect_all_shared_walls(void) {
                         new_portal->x2 = overlap_x2;
                         new_portal->y2 = overlap_y2;
                         
-                        /* BUILD ENGINE: Portal height uses min ceiling and max floor */
-                        new_portal->floor_z = fmaxf(sector_a->floor_z, sector_b->floor_z);
-                        new_portal->ceiling_z = fminf(sector_a->ceiling_z, sector_b->ceiling_z);
-                        
                         /* Assign portal to both wall segments */
                         portal_wall_a->portal_id = new_portal->portal_id;
                         portal_wall_b->portal_id = new_portal->portal_id;
@@ -802,110 +729,104 @@ static void ray_detect_all_shared_walls(void) {
     printf("RAY: Created %d automatic portals\n", portals_created);
 }
 
-/* Detect nested sectors using parent_sector_id and create invisible portals */
+/* Detect nested sectors (sectors completely inside other sectors) and create portals */
 static void ray_detect_nested_sectors(void) {
     int portals_created = 0;
     
-    printf("RAY: Creating invisible portals for parent-child sectors...\n");
+    printf("RAY: Detecting nested sectors (Build Engine style)...\n");
     
-    // For each sector that has a parent, create an invisible portal to that parent
+    // For each pair of sectors, check if one is completely inside the other
     for (int i = 0; i < g_engine.num_sectors; i++) {
-        RAY_Sector *child = &g_engine.sectors[i];
+        RAY_Sector *sector_a = &g_engine.sectors[i];
         
-        // Skip if no parent
-        if (child->parent_sector_id < 0 || child->parent_sector_id >= g_engine.num_sectors) {
-            continue;
-        }
-        
-        RAY_Sector *parent = &g_engine.sectors[child->parent_sector_id];
-        
-        printf("RAY:   Checking S%d (parent=S%d)...\n", child->sector_id, parent->sector_id);
-        
-        // Check if there's already a portal between these sectors (from shared walls)
-        int portal_exists = 0;
-        for (int p = 0; p < child->num_portals; p++) {
-            int portal_id = child->portal_ids[p];
-            if (portal_id >= 0 && portal_id < g_engine.num_portals) {
-                RAY_Portal *portal = &g_engine.portals[portal_id];
-                if ((portal->sector_a == parent->sector_id && portal->sector_b == child->sector_id) ||
-                    (portal->sector_a == child->sector_id && portal->sector_b == parent->sector_id)) {
-                    portal_exists = 1;
-                    break;
+        for (int j = 0; j < g_engine.num_sectors; j++) {
+            if (i == j) continue;
+            
+            RAY_Sector *sector_b = &g_engine.sectors[j];
+            
+            // Check if sector_b's AABB is completely inside sector_a's AABB
+            if (sector_b->min_x >= sector_a->min_x && sector_b->max_x <= sector_a->max_x &&
+                sector_b->min_y >= sector_a->min_y && sector_b->max_y <= sector_a->max_y) {
+                
+                // sector_b is inside sector_a - create invisible portal
+                // Find closest walls between the two sectors
+                float min_dist = FLT_MAX;
+                int best_wall_a = -1;
+                int best_wall_b = -1;
+                
+                for (int wa = 0; wa < sector_a->num_walls; wa++) {
+                    RAY_Wall *wall_a = &sector_a->walls[wa];
+                    if (wall_a->portal_id != -1) continue;
+                    
+                    for (int wb = 0; wb < sector_b->num_walls; wb++) {
+                        RAY_Wall *wall_b = &sector_b->walls[wb];
+                        if (wall_b->portal_id != -1) continue;
+                        
+                        // Calculate distance between wall centers
+                        float ax = (wall_a->x1 + wall_a->x2) * 0.5f;
+                        float ay = (wall_a->y1 + wall_a->y2) * 0.5f;
+                        float bx = (wall_b->x1 + wall_b->x2) * 0.5f;
+                        float by = (wall_b->y1 + wall_b->y2) * 0.5f;
+                        
+                        float dist = sqrtf((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+                        if (dist < min_dist) {
+                            min_dist = dist;
+                            best_wall_a = wa;
+                            best_wall_b = wb;
+                        }
+                    }
+                }
+                
+                // Create portal between closest walls
+                if (best_wall_a >= 0 && best_wall_b >= 0) {
+                    if (g_engine.num_portals >= g_engine.portals_capacity) {
+                        printf("RAY: WARNING - Portal capacity reached\n");
+                        return;
+                    }
+                    
+                    RAY_Wall *wall_a = &sector_a->walls[best_wall_a];
+                    RAY_Wall *wall_b = &sector_b->walls[best_wall_b];
+                    
+                    RAY_Portal *new_portal = &g_engine.portals[g_engine.num_portals];
+                    memset(new_portal, 0, sizeof(RAY_Portal));
+                    
+                    new_portal->portal_id = g_engine.num_portals;
+                    new_portal->sector_a = sector_a->sector_id;
+                    new_portal->sector_b = sector_b->sector_id;
+                    new_portal->wall_id_a = best_wall_a;
+                    new_portal->wall_id_b = best_wall_b;
+                    new_portal->x1 = wall_a->x1;
+                    new_portal->y1 = wall_a->y1;
+                    new_portal->x2 = wall_a->x2;
+                    new_portal->y2 = wall_a->y2;
+                    
+                    wall_a->portal_id = new_portal->portal_id;
+                    wall_b->portal_id = new_portal->portal_id;
+                    
+                    // Auto-assign textures
+                    if (wall_a->texture_id_upper == 0) wall_a->texture_id_upper = wall_a->texture_id_middle;
+                    if (wall_a->texture_id_lower == 0) wall_a->texture_id_lower = wall_a->texture_id_middle;
+                    if (wall_b->texture_id_upper == 0) wall_b->texture_id_upper = wall_b->texture_id_middle;
+                    if (wall_b->texture_id_lower == 0) wall_b->texture_id_lower = wall_b->texture_id_middle;
+                    
+                    if (sector_a->num_portals < sector_a->portals_capacity) {
+                        sector_a->portal_ids[sector_a->num_portals++] = new_portal->portal_id;
+                    }
+                    if (sector_b->num_portals < sector_b->portals_capacity) {
+                        sector_b->portal_ids[sector_b->num_portals++] = new_portal->portal_id;
+                    }
+                    
+                    g_engine.num_portals++;
+                    portals_created++;
+                    
+                    printf("RAY: Created nested portal %d: Parent Sector %d <-> Nested Sector %d\n",
+                           new_portal->portal_id, sector_a->sector_id, sector_b->sector_id);
                 }
             }
         }
-        
-        if (portal_exists) {
-            printf("RAY:   S%d <-> S%d already has portal (shared wall)\n", 
-                   parent->sector_id, child->sector_id);
-            continue;
-        }
-        
-        // Find any wall from each sector (prefer first wall)
-        if (parent->num_walls == 0 || child->num_walls == 0) {
-            printf("RAY:   WARNING: S%d or S%d has no walls, skipping\n", 
-                   parent->sector_id, child->sector_id);
-            continue;
-        }
-        
-        // Check portal capacity
-        if (g_engine.num_portals >= g_engine.portals_capacity) {
-            printf("RAY: WARNING - Portal capacity reached\n");
-            return;
-        }
-        
-        // Use first available wall from each sector
-        int parent_wall_idx = 0;
-        int child_wall_idx = 0;
-        
-        RAY_Wall *parent_wall = &parent->walls[parent_wall_idx];
-        RAY_Wall *child_wall = &child->walls[child_wall_idx];
-        
-        // Create invisible portal
-        RAY_Portal *new_portal = &g_engine.portals[g_engine.num_portals];
-        memset(new_portal, 0, sizeof(RAY_Portal));
-        
-        new_portal->portal_id = g_engine.num_portals;
-        new_portal->sector_a = parent->sector_id;
-        new_portal->sector_b = child->sector_id;
-        new_portal->wall_id_a = parent_wall_idx;
-        new_portal->wall_id_b = child_wall_idx;
-        
-        // Use child wall coordinates for portal (doesn't matter for invisible portals)
-        new_portal->x1 = child_wall->x1;
-        new_portal->y1 = child_wall->y1;
-        new_portal->x2 = child_wall->x2;
-        new_portal->y2 = child_wall->y2;
-        
-        // ASSIGN portal_id to walls so the portal system can traverse them
-        // The walls will still render (they're not transparent) but portals can be traversed
-        parent_wall->portal_id = new_portal->portal_id;
-        child_wall->portal_id = new_portal->portal_id;
-        
-        // Add to both sectors' portal lists
-        if (parent->num_portals < parent->portals_capacity) {
-            parent->portal_ids[parent->num_portals++] = new_portal->portal_id;
-        }
-        if (child->num_portals < child->portals_capacity) {
-            child->portal_ids[child->num_portals++] = new_portal->portal_id;
-        }
-        
-        g_engine.num_portals++;
-        portals_created++;
-        
-        printf("RAY:   Created invisible portal %d: Parent S%d <-> Child S%d\n",
-               new_portal->portal_id, parent->sector_id, child->sector_id);
     }
     
-    printf("RAY: Created %d invisible portals for nested sectors\n", portals_created);
-    
-    // DEBUG: Print all portals
-    printf("RAY: === PORTAL SUMMARY ===\n");
-    for (int i = 0; i < g_engine.num_portals; i++) {
-        RAY_Portal *p = &g_engine.portals[i];
-        printf("RAY:   Portal %d: S%d <-> S%d\n", p->portal_id, p->sector_a, p->sector_b);
-    }
-    printf("RAY: === END PORTAL SUMMARY ===\n");
+    printf("RAY: Created %d portals for nested sectors\n", portals_created);
 }
 
 /* Detect walls shared between parent and child sectors and create portals */

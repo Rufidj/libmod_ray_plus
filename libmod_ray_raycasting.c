@@ -465,23 +465,19 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
 {
     if (!engine) return 1;  /* Blocked by default */
     
-    /* Find sector at new position - use ray_find_sector_at_position for nested sectors */
-    RAY_Sector *new_sector = ray_find_sector_at_position(engine, new_x, new_y, z);
+    /* Find sector at new position */
+    RAY_Sector *new_sector = ray_find_sector_at_point(engine, new_x, new_y);
     
     if (!new_sector) {
-        printf("COLLISION DEBUG: No sector at new position (%.1f, %.1f) - BLOCKED\n", new_x, new_y);
         return 1;  /* Outside all sectors - blocked */
     }
     
     /* Find sector at current position */
-    RAY_Sector *current_sector = ray_find_sector_at_position(engine, x, y, z);
+    RAY_Sector *current_sector = ray_find_sector_at_point(engine, x, y);
     
     if (!current_sector) {
-        printf("COLLISION DEBUG: No current sector - allowing move to S%d\n", new_sector->sector_id);
         return 0;  /* Currently outside - allow movement into sector */
     }
-    
-    printf("COLLISION DEBUG: Move from S%d to S%d\n", current_sector->sector_id, new_sector->sector_id);
     
     // Physics Constants
     float player_height = 32.0f; // Simplified player height
