@@ -25,8 +25,11 @@ private slots:
     void onPlatformChanged(int index);
     void onDownloadAppImageTool();
     void onDownloadNDK(); // NEW // NEW
+    void onInstallEmsdk();
+    void refreshWindowsTools(); // Refresh detection of Windows tools
 
 private:
+    QString findToolPath(const QString &toolName); // Helper to find tools aggressively
     ProjectData *m_project;
     Publisher m_publisher;
     
@@ -41,7 +44,16 @@ private:
     // Linux Options
     QWidget *m_linuxOptions;
     QCheckBox *m_chkLinuxArchive;
+    QCheckBox *m_chkLinuxStandalone;
     QCheckBox *m_chkLinuxAppImage;
+
+    // Windows Options
+    QWidget *m_windowsOptions;
+    QCheckBox *m_chkWindowsStandalone;
+    QCheckBox *m_chkWindowsSfx;
+    QCheckBox *m_chkWindowsZip;
+    QPushButton *m_installMingwBtn;
+    QPushButton *m_install7zBtn;
 
     // Android Options
     QWidget *m_androidOptions;
@@ -49,6 +61,16 @@ private:
     QLineEdit *m_iconPathEdit;
     QCheckBox *m_chkAndroidProject;
     QCheckBox *m_chkAndroidAPK;
+    
+    // Switch Options
+    QWidget *m_switchOptions;
+    QLineEdit *m_switchAuthorEdit;
+
+    // Web Options
+    QWidget *m_webOptions;
+    QLineEdit *m_webTitleEdit;
+    QPushButton *m_installEmsdkBtn;
+    QLabel *m_emsdkStatusLabel;
 
     QProgressBar *m_progressBar;
     QPushButton *m_publishButton;
