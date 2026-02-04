@@ -27,13 +27,13 @@ include_directories(
 set(SOURCES_LIBMOD_RAY
     libmod_ray.c
     libmod_ray_map.c
-    libmod_ray_decal_baking.c
+    # libmod_ray_decal_baking.c (Removed in Ray Plus)
     libmod_ray_raycasting.c
     libmod_ray_render.c
     libmod_ray_geometry.c
     libmod_ray_render_recursive.c
     libmod_ray_render_build.c
-    libmod_ray_render_decals.c
+    # libmod_ray_render_decals.c (Removed in Ray Plus)
     libmod_ray_camera.c
     libmod_ray_md2.c
     libmod_ray_render_md2.c

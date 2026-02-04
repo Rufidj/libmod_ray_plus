@@ -754,6 +754,18 @@ int64_t libmod_ray_check_collision(INSTANCE *my, int64_t *params) {
     return ray_check_collision(&g_engine, x, y, g_engine.camera.z, new_x, new_y);
 }
 
+int64_t libmod_ray_check_collision_z(INSTANCE *my, int64_t *params) {
+    if (!g_engine.initialized) return 0;
+    
+    float x = *(float*)&params[0];
+    float y = *(float*)&params[1];
+    float z = *(float*)&params[2];
+    float new_x = *(float*)&params[3];
+    float new_y = *(float*)&params[4];
+    
+    return ray_check_collision(&g_engine, x, y, z, new_x, new_y);
+}
+
 int64_t libmod_ray_set_minimap(INSTANCE *my, int64_t *params) {
     if (!g_engine.initialized) return 0;
     
@@ -1049,6 +1061,42 @@ int64_t libmod_ray_get_floor_height(INSTANCE *my, int64_t *params) {
     }
     
     return 0;
+}
+
+/* ============================================================================
+   CÁMARA UPDATE (MOUSE LOOK)
+   ============================================================================ */
+
+int64_t libmod_ray_camera_update(INSTANCE *my, int64_t *params) {
+    if (!g_engine.initialized) return 0;
+    
+    float sensitivity = *(float*)&params[0];
+    
+    int mx, my_pos;
+    Uint32 buttons = SDL_GetRelativeMouseState(&mx, &my_pos);
+    
+    // Rotate (Yaw) - X axis
+    if (mx != 0) {
+        g_engine.camera.rot += mx * sensitivity; // Mouse Right -> Rotate Right (Increase Angle)
+        
+        // Normalize angle
+        while (g_engine.camera.rot < 0) g_engine.camera.rot += RAY_TWO_PI;
+        while (g_engine.camera.rot >= RAY_TWO_PI) g_engine.camera.rot -= RAY_TWO_PI;
+    }
+    
+    // Pitch (Look Up/Down) - Y axis
+    if (my_pos != 0) {
+        // Mouse Down (Positive Y) -> Look Down (Decrease Pitch)
+        // Mouse Up (Negative Y) -> Look Up (Increase Pitch)
+        g_engine.camera.pitch -= my_pos * sensitivity;
+        
+        // Clamp pitch
+        const float max_pitch = M_PI / 2.0f * 0.99f;
+        if (g_engine.camera.pitch > max_pitch) g_engine.camera.pitch = max_pitch;
+        if (g_engine.camera.pitch < -max_pitch) g_engine.camera.pitch = -max_pitch;
+    }
+    
+    return 1;
 }
 
 /* ============================================================================

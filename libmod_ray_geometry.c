@@ -199,11 +199,10 @@ RAY_Sector* ray_find_sector_at_point(RAY_Engine *engine, float x, float y)
         return &engine->sectors[candidates[0]];
     }
     
-    /* BUILD_ENGINE: Multiple overlapping sectors - just return first match
-     * In pure Build Engine, sectors don't overlap (they're connected by portals)
-     * For now: Return first candidate
+    /* Prioritize the LAST candidate (usually the innermost/newest sector) 
+     * This ensures that nested sectors (islands) are returned instead of the parent
      */
-    return &engine->sectors[candidates[0]];
+    return &engine->sectors[candidates[candidate_count - 1]];
 }
 
 

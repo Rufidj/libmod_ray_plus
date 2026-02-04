@@ -234,7 +234,77 @@ void ray_cast_ray(RAY_Engine *engine, float ray_angle, int strip_idx,
         RAY_RayHit local_hits[RAY_MAX_WALLS_PER_SECTOR]; // Stack allocation safe? 16 walls usually.
         int num_local_hits = 0;
         
-        // Manual intersection loop to fill local_hits efficiently
+        /* --------------------------------------------------------------------
+           CHECK SOLID CHILD SECTORS (ISLANDS)
+           Allows rendering of floating boxes/columns without portals
+           -------------------------------------------------------------------- */
+        if (ray_sector_has_children(sector)) {
+            int num_children = ray_sector_get_num_children(sector);
+            
+            for (int c = 0; c < num_children; c++) {
+                int child_id = ray_sector_get_child(sector, c);
+                
+                /* Find child sector pointer */
+                RAY_Sector *child = NULL;
+                if (child_id >= 0 && child_id < engine->num_sectors && 
+                    engine->sectors[child_id].sector_id == child_id) {
+                     child = &engine->sectors[child_id];
+                } else {
+                     for(int s=0; s<engine->num_sectors; s++) {
+                         if (engine->sectors[s].sector_id == child_id) {
+                             child = &engine->sectors[s];
+                             break;
+                         }
+                     }
+                }
+                
+                if (child) {
+                    if (strip_idx == 320 && cur_sector_id == 0) {
+                         printf("  Child %d (ID %d): Solid=%d, Walls=%d\n", c, child_id, ray_sector_is_solid(child), child->num_walls);
+                    }
+                    
+                    if (ray_sector_is_solid(child)) {
+                         /* Raycast against island walls */
+                         for (int w = 0; w < child->num_walls && num_local_hits < RAY_MAX_WALLS_PER_SECTOR; w++) {
+                             RAY_Wall *wall = &child->walls[w];
+                             float distance, hit_x, hit_y;
+                             ray_find_wall_intersection(cur_x, cur_y, ray_angle, wall, &distance, &hit_x, &hit_y);
+                             
+                             if (distance < FLT_MAX) {
+                                 if (strip_idx == 320 && cur_sector_id == 0) {
+                                     printf("    HIT Wall %d! Dist=%.2f\n", wall->wall_id, distance);
+                                 }
+                                 
+                                 RAY_RayHit *hit = &local_hits[num_local_hits];
+                                 memset(hit, 0, sizeof(RAY_RayHit));
+                                 
+                                 hit->x = hit_x; hit->y = hit_y;
+                                 hit->sector_id = child->sector_id;
+                                 hit->wall_id = wall->wall_id;
+                                 hit->wall = wall;
+                                 hit->distance = distance + accum_dist;
+                                 hit->rayAngle = ray_angle;
+                                 
+                                 float dx = hit_x - wall->x1; float dy = hit_y - wall->y1;
+                                 hit->tileX = sqrtf(dx*dx + dy*dy);
+                                 
+                                 hit->wallHeight = child->ceiling_z - child->floor_z;
+                                 hit->wallZOffset = child->floor_z;
+                                 
+                                 float angle_diff = ray_angle - engine->camera.rot;
+                                 hit->correctDistance = hit->distance * cosf(angle_diff);
+                                 hit->strip = strip_idx;
+                                 
+                                 num_local_hits++;
+                             } else {
+                                 // Debug miss if close?
+                                 // if (strip_idx == 320) printf("    Miss Wall %d\n", wall->wall_id);
+                             }
+                         }
+                    }
+                }
+            }
+        }
         for (int i = 0; i < sector->num_walls && num_local_hits < RAY_MAX_WALLS_PER_SECTOR; i++) {
             RAY_Wall *wall = &sector->walls[i];
             float distance, hit_x, hit_y;
@@ -479,6 +549,53 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
         return 0;  /* Currently outside - allow movement into sector */
     }
     
+    // =========================================================================
+    // 0. WALL INTERSECTION CHECK (ROBUST)
+    // Prevent crossing any solid wall, regardless of sector hierarchy.
+    // =========================================================================
+    for (int w = 0; w < current_sector->num_walls; w++) {
+        RAY_Wall *wall = &current_sector->walls[w];
+        float ix, iy;
+        
+        // Use a small epsilon shrink for the check to allow 'sliding' along wall?
+        // No, strict check first.
+        if (ray_line_segment_intersect(x, y, new_x, new_y, 
+                                      wall->x1, wall->y1, wall->x2, wall->y2, &ix, &iy)) {
+            
+            // If SOLID WALL -> BLOCK
+            // Also block if it's a closed door? (Not handled here, purely geometry)
+            if (wall->portal_id == -1) {
+                // Ignore intersection at exact start point to allow moving AWAY from wall
+                float dx = ix - x;
+                float dy = iy - y;
+                if (dx*dx + dy*dy > 0.001f) { 
+                    return 1; // Collision with wall
+                }
+            }
+        }
+    }
+    
+    // =========================================================================
+    // 0.B. NEW SECTOR WALL CHECK (CRITICAL FOR NESTED ISLANDS)
+    // If moving into a nested sector (island), we must not cross its solid walls.
+    // The parent sector might not know about these walls (no inner loop), so we check the target.
+    // =========================================================================
+    if (new_sector && new_sector != current_sector) {
+        for (int w = 0; w < new_sector->num_walls; w++) {
+            RAY_Wall *wall = &new_sector->walls[w];
+            float ix, iy;
+            
+            if (ray_line_segment_intersect(x, y, new_x, new_y, 
+                                          wall->x1, wall->y1, wall->x2, wall->y2, &ix, &iy)) {
+                
+                // If SOLID WALL -> BLOCK
+                if (wall->portal_id == -1) {
+                     return 1; // Collision with nested sector wall
+                }
+            }
+        }
+    }
+    
     // Physics Constants
     float player_height = 32.0f; // Simplified player height
     float step_height = 32.0f;   // Max step up
@@ -490,11 +607,14 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z, float new
         int allowed_entry = 0;
 
         /* 1. Check Hierarchy (Robust check for Parent <-> Nested Room) */
+        /* DISABLED: Force strictly portal-based movement. If a nested sector is solid (no portal), we can't enter. */
+        /*
         if (ray_sector_get_parent(new_sector) == current_sector->sector_id || 
             ray_sector_get_parent(current_sector) == new_sector->sector_id) {
             printf("DEBUG: Hierarchy Allow! %d <-> %d\n", new_sector->sector_id, current_sector->sector_id);
             allowed_entry = 1;
         }
+        */
 
         /* 2. Check Portals (Fallback if hierarchy not set but portal exists) */
         if (!allowed_entry) {
