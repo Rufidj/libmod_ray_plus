@@ -39,6 +39,7 @@ set(SOURCES_LIBMOD_RAY
     libmod_ray_render_md2.c
     libmod_ray_md3.c
     libmod_ray_render_md3.c
+    libmod_ray_gltf.c
     libmod_ray_render_gpu.c
 )
 
@@ -47,6 +48,7 @@ add_library(mod_ray ${LIBRARY_BUILD_TYPE} ${SOURCES_LIBMOD_RAY})
 target_link_libraries(mod_ray
     ${SDL2_LIBRARY}
     ${SDL2_LIBRARIES}
+    ${SDL_GPU_LIBRARY}
     -L../../bin
     bgdrtm
     bggfx
