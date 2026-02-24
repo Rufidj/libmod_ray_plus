@@ -30,6 +30,10 @@
 extern RAY_Engine g_engine;
 extern GPU_Target *gRenderer;
 
+/* Forward declarations */
+void ray_render_scene_gpu(GPU_Target *target, int current_sector);
+static void render_sprite_gpu(GPU_Target *target, RAY_Sprite *sprite);
+
 /* ============================================================================
    CONSTANTS
    ============================================================================
@@ -166,6 +170,10 @@ static int s_u_normal = -1;
 static int s_u_focal = -1;
 static int s_u_halfW = -1;
 static int s_u_horizon = -1;
+static int s_u_time = -1;
+static int s_u_sectorFlags = -1;
+static int s_u_liquidIntensity = -1;
+static int s_u_liquidSpeed = -1;
 
 static const char *vertex_shader_source =
     "#version 120\n"
@@ -201,45 +209,74 @@ static const char *fragment_shader_source =
     "uniform float u_focal;\n"
     "uniform float u_halfW;\n"
     "uniform float u_horizon;\n"
+    "uniform float u_time;\n"
+    "uniform int u_sectorFlags;\n"
+    "uniform float u_liquidIntensity;\n"
+    "uniform float u_liquidSpeed;\n"
     "void main() {\n"
-    "    vec4 texColor = texture2D(tex, uv) * colorVarying;\n"
-    "    if (texColor.a < 0.1) discard;\n"
-    "    // If no lights, show texture at full brightness (no darkening)\n"
-    "    if (u_numLights == 0) {\n"
+    "    vec2 finalUV = uv;\n"
+    "    float fFlags = float(u_sectorFlags) + 0.1;\n"
+    "    bool isWater = mod(fFlags, 2.0) >= 1.0;\n"
+    "    bool isLava  = mod(floor(fFlags / 2.0), 2.0) >= 1.0;\n"
+    "    bool isAcid  = mod(floor(fFlags / 4.0), 2.0) >= 1.0;\n"
+    "    bool scrollX = mod(floor(fFlags / 8.0), 2.0) >= 1.0;\n"
+    "    bool scrollY = mod(floor(fFlags / 16.0), 2.0) >= 1.0;\n"
+    "    bool ripples = mod(floor(fFlags / 256.0), 2.0) >= 1.0;\n"
+    "\n"
+    "    float effectiveTime = u_time * u_liquidSpeed;\n"
+    "    float freqMul = (abs(u_normal.y) > 0.5) ? 0.6 : 1.0;\n"
+    "    if (ripples) {\n"
+    "        if (isWater || (!isLava && !isAcid)) {\n"
+    "            finalUV.x += sin(uv.y * 6.0 * freqMul + effectiveTime * 4.0) "
+    "* 0.20 * max(u_liquidIntensity, 0.2);\n"
+    "            finalUV.y += cos(uv.x * 6.0 * freqMul + effectiveTime * 3.5) "
+    "* 0.20 * max(u_liquidIntensity, 0.2);\n"
+    "        } else if (isLava) {\n"
+    "            finalUV.x += sin(uv.y * 3.0 * freqMul + effectiveTime * 2.0) "
+    "* 0.25 * max(u_liquidIntensity, 0.2);\n"
+    "            finalUV.y += cos(uv.x * 3.0 * freqMul + effectiveTime * 1.5) "
+    "* 0.25 * max(u_liquidIntensity, 0.2);\n"
+    "        } else if (isAcid) {\n"
+    "            finalUV.x += sin(uv.y * 12.0 * freqMul + effectiveTime * 8.0) "
+    "* 0.10 * max(u_liquidIntensity, 0.2);\n"
+    "            finalUV.y += cos(uv.x * 12.0 * freqMul + effectiveTime * 8.0) "
+    "* 0.10 * max(u_liquidIntensity, 0.2);\n"
+    "        }\n"
+    "    }\n"
+    "    if (scrollX) finalUV.x += effectiveTime * 1.0;\n"
+    "    if (scrollY) finalUV.y += effectiveTime * 1.0;\n"
+    "\n"
+    "    vec4 texColor = texture2D(tex, finalUV) * colorVarying;\n"
+    "    if (isWater || isLava || isAcid) texColor.a *= 0.5;\n"
+    "    if (u_time < 0.001) texColor.rgb *= 0.1; // Visual Debug: if time "
+    "stalls, darken\n"
+    "    if (texColor.a < 0.01) discard;\n"
+    "    if (u_numLights <= 0) {\n"
     "        gl_FragColor = texColor;\n"
     "        return;\n"
     "    }\n"
-    "    \n"
-    "    // Reconstruct View-Space Position from Screen Vertex\n"
     "    float t_z = (100.0 - fragPos.z) / 200.0;\n"
     "    float tz = exp(t_z * 11.512925 - 2.302585);\n"
     "    float tx = (fragPos.x - u_halfW) * tz / u_focal;\n"
     "    float ty = (u_horizon - fragPos.y) * tz / u_focal;\n"
     "    vec3 vPos = vec3(tx, ty, tz);\n"
-    "    \n"
     "    vec3 worldNormal = normalize(u_normal);\n"
     "    if (useNormalMap != 0) {\n"
     "        vec3 nm = texture2D(normalMap, uv).rgb * 2.0 - 1.0;\n"
     "        worldNormal = normalize(nm.x * u_tangent + nm.y * u_bitangent + "
     "nm.z * u_normal);\n"
     "    }\n"
-    "    \n"
-    "    vec3 finalLight = vec3(0.12, 0.12, 0.12); // Low ambient for "
-    "contrast\n"
-    "    for(int i = 0; i < u_numLights; i++) {\n"
+    "    vec3 finalLight = vec3(0.2, 0.2, 0.2);\n"
+    "    for(int i = 0; i < 16; i++) {\n"
+    "        if (i >= u_numLights) break;\n"
     "        vec3 lightVector = u_lightPos[i] - vPos;\n"
     "        float distSq = dot(lightVector, lightVector);\n"
     "        float radSq = u_lightIntensity[i] * u_lightIntensity[i];\n"
-    "        \n"
-    "        // Smooth Attenuation\n"
-    "        float attenuation = radSq / (radSq + distSq);\n"
-    "        \n"
-    "        // Omnidirectional + diffuse bonus\n"
+    "        float attenuation = radSq / (radSq + distSq + 1.0);\n"
     "        vec3 L = normalize(lightVector);\n"
     "        float diff = max(dot(worldNormal, L), 0.0);\n"
-    "        float lighting = 0.5 + 0.5 * diff;\n"
-    "        \n"
-    "        finalLight += u_lightColor[i] * lighting * attenuation * 2.0;\n"
+    "        finalLight += u_lightColor[i] * (0.5 + 0.5 * diff) * attenuation "
+    "* 2.0;\n"
     "    }\n"
     "    gl_FragColor = vec4(texColor.rgb * finalLight, texColor.a);\n"
     "}\n";
@@ -275,15 +312,24 @@ static void init_normal_shader(void) {
   s_u_focal = GPU_GetUniformLocation(s_normal_shader, "u_focal");
   s_u_halfW = GPU_GetUniformLocation(s_normal_shader, "u_halfW");
   s_u_horizon = GPU_GetUniformLocation(s_normal_shader, "u_horizon");
+  s_u_time = GPU_GetUniformLocation(s_normal_shader, "u_time");
+  s_u_sectorFlags = GPU_GetUniformLocation(s_normal_shader, "u_sectorFlags");
+  s_u_liquidIntensity =
+      GPU_GetUniformLocation(s_normal_shader, "u_liquidIntensity");
+  s_u_liquidSpeed = GPU_GetUniformLocation(s_normal_shader, "u_liquidSpeed");
 }
 
 static void activate_normal_shader(GPU_Image *normalMap, float tx, float ty,
                                    float tz, float bx, float by, float bz,
-                                   float nx, float ny, float nz) {
+                                   float nx, float ny, float nz,
+                                   int sectorFlags, float liquidIntensity,
+                                   float liquidSpeed) {
   init_normal_shader();
   if (s_normal_shader == 0)
     return;
   GPU_ActivateShaderProgram(s_normal_shader, &s_normal_block);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   GPU_SetUniformi(s_u_tex, 0);       /* Texture unit 0 */
   GPU_SetUniformi(s_u_normalMap, 1); /* Texture unit 1 */
@@ -292,6 +338,7 @@ static void activate_normal_shader(GPU_Image *normalMap, float tx, float ty,
     GPU_SetUniformi(s_u_useNormalMap, 1);
     /* Bind normal map to unit 1 using SDL_gpu */
     GPU_SetShaderImage(normalMap, s_u_normalMap, 1);
+    GPU_SetBlendMode(normalMap, GPU_BLEND_NORMAL);
   } else {
     GPU_SetUniformi(s_u_useNormalMap, 0);
   }
@@ -325,6 +372,10 @@ static void activate_normal_shader(GPU_Image *normalMap, float tx, float ty,
   GPU_SetUniformf(s_u_focal, s_focal);
   GPU_SetUniformf(s_u_halfW, (float)s_half_w);
   GPU_SetUniformf(s_u_horizon, (float)s_horizon);
+  GPU_SetUniformf(s_u_time, g_engine.time);
+  GPU_SetUniformi(s_u_sectorFlags, sectorFlags);
+  GPU_SetUniformf(s_u_liquidIntensity, liquidIntensity);
+  GPU_SetUniformf(s_u_liquidSpeed, liquidSpeed);
 
   /* Transform TBN Matrix to View Space */
   /* World vectors (nx, ny, tx, ty, bx, by) -> View space (X=Right, Z=Forward)
@@ -407,8 +458,19 @@ static void render_sector_plane(GPU_Target *target, RAY_Sector *sector,
 
   float nx_p = 0, ny_p = 0, nz_p = (h > 0) ? -1.0f : 1.0f;
   float bx_p = 0, by_p = (h > 0) ? -1.0f : 1.0f, bz_p = 0;
+
+  int activeFlags = sector->flags & (24 | 256); /* Scroll bits & Ripples bit */
+  if (h > 0) {                                  // Ceiling
+    if (sector->flags & 64)
+      activeFlags |= (sector->flags & 7);
+  } else { // Floor
+    if (sector->flags & 32)
+      activeFlags |= (sector->flags & 7);
+  }
+
   activate_normal_shader(normal_tex, 1.0f, 0.0f, 0.0f, bx_p, by_p, bz_p, nx_p,
-                         ny_p, nz_p);
+                         ny_p, nz_p, activeFlags, sector->liquid_intensity,
+                         sector->liquid_speed);
 
   if (depth > 0) {
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -503,7 +565,8 @@ static void render_sector_plane(GPU_Target *target, RAY_Sector *sector,
       if (x0 >= x1)
         continue;
 
-      /* FIXED WORLD UVs: Prevents texture sliding (wx, wy anchored to world) */
+      /* FIXED WORLD UVs: Prevents texture sliding (wx, wy anchored to world)
+       */
       float l_rel = (x0 - s_half_w) * rz / s_focal;
       float r_rel = (x1 - s_half_w) * rz / s_focal;
       float wx0 = s_cam_x + (rz * s_cos_ang - l_rel * s_sin_ang);
@@ -591,7 +654,19 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
   */
   float nx = 0, ny = 0, nz = (h > 0) ? -1.0f : 1.0f;
   float bx = 0, by = (h > 0) ? -1.0f : 1.0f, bz = 0;
-  activate_normal_shader(normal_tex, 1.0f, 0.0f, 0.0f, bx, by, bz, nx, ny, nz);
+
+  int activeFlags = (sector->flags & (8 | 16 | 256)); // Scroll & Ripples
+  if (h > 0) {                                        // Ceiling face
+    if (sector->flags & 64)
+      activeFlags |= (sector->flags & 7);
+  } else { // Floor face
+    if (sector->flags & 32)
+      activeFlags |= (sector->flags & 7);
+  }
+
+  activate_normal_shader(normal_tex, 1.0f, 0.0f, 0.0f, bx, by, bz, nx, ny, nz,
+                         activeFlags, sector->liquid_intensity,
+                         sector->liquid_speed);
 
   /* Calculate bounding box of the sector for fixed texture mapping (0..1) */
   float min_x = sector->walls[0].x1, max_x = sector->walls[0].x1;
@@ -749,7 +824,7 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
 
 static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
                               int depth, int is_island, float parent_floor_z,
-                              float parent_ceil_z) {
+                              float parent_ceil_z, int transparent_pass) {
   if (depth > MAX_PORTAL_DEPTH)
     return;
   if (visited_test(sector_id))
@@ -805,8 +880,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
       if (!child)
         continue;
 
-      /* If child ceiling is at our floor height, it punches a hole in the floor
-       * (PIT) */
+      /* If child ceiling is at our floor height, it punches a hole in the
+       * floor (PIT) */
       if (fabsf(child->ceiling_z - sector->floor_z) < 0.1f ||
           child->ceiling_z < sector->floor_z) {
         for (int w = 0; w < child->num_walls; w++) {
@@ -846,9 +921,20 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     GPU_Image *floor_tex = get_gpu_texture(0, sector->floor_texture_id);
     GPU_Image *floor_normal_tex = get_gpu_texture(0, sector->floor_normal_id);
     if (floor_tex) {
-      render_sector_plane(target, sector, sector->floor_z, floor_tex,
-                          floor_normal_tex, xf_walls, sector->num_walls, depth,
-                          is_island, clip, num_floor_cutouts, floor_cutouts);
+      int is_fluid =
+          (sector->flags & 32) != 0; /* RAY_SECTOR_FLAG_LIQUID_FLOOR */
+      if ((transparent_pass && is_fluid) || (!transparent_pass && !is_fluid)) {
+        if (transparent_pass) {
+          glDepthMask(GL_FALSE);
+          GPU_SetBlendMode(floor_tex, GPU_BLEND_NORMAL);
+        }
+        render_sector_plane(target, sector, sector->floor_z, floor_tex,
+                            floor_normal_tex, xf_walls, sector->num_walls,
+                            depth, is_island, clip, num_floor_cutouts,
+                            floor_cutouts);
+        if (transparent_pass)
+          glDepthMask(GL_TRUE);
+      }
     }
   }
 
@@ -856,9 +942,19 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     GPU_Image *ceil_tex = get_gpu_texture(0, sector->ceiling_texture_id);
     GPU_Image *ceil_normal_tex = get_gpu_texture(0, sector->ceiling_normal_id);
     if (ceil_tex) {
-      render_sector_plane(target, sector, sector->ceiling_z, ceil_tex,
-                          ceil_normal_tex, xf_walls, sector->num_walls, depth,
-                          is_island, clip, num_ceil_cutouts, ceil_cutouts);
+      int is_fluid =
+          (sector->flags & 64) != 0; /* RAY_SECTOR_FLAG_LIQUID_CEILING */
+      if ((transparent_pass && is_fluid) || (!transparent_pass && !is_fluid)) {
+        if (transparent_pass) {
+          glDepthMask(GL_FALSE);
+          GPU_SetBlendMode(ceil_tex, GPU_BLEND_NORMAL);
+        }
+        render_sector_plane(target, sector, sector->ceiling_z, ceil_tex,
+                            ceil_normal_tex, xf_walls, sector->num_walls, depth,
+                            is_island, clip, num_ceil_cutouts, ceil_cutouts);
+        if (transparent_pass)
+          glDepthMask(GL_TRUE);
+      }
     }
   }
   /* ---- CHILD SECTORS (Room-over-Room / Nested) ---- */
@@ -979,7 +1075,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
         if (clip_valid(new_clip)) {
           /* Render adjacent sector clipped to the portal opening rectangle */
           render_sector_gpu(target, other_sector_id, new_clip, depth + 1, 0,
-                            sector->floor_z, sector->ceiling_z);
+                            sector->floor_z, sector->ceiling_z,
+                            transparent_pass);
 
           /* Repair: the portal opening is a trapezoid but new_clip is a
              rectangle. Paint the parent floor/ceiling in the excess corners.
@@ -1163,9 +1260,13 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
                 float wall_nx_u = (wall->y1 - wall->y2) / wall_len_u;
                 float wall_ny_u = (wall->x2 - wall->x1) / wall_len_u;
 
-                activate_normal_shader(upper_normal_tex, wall_tx_u, wall_ty_u,
-                                       0.0f, 0.0f, 0.0f, 1.0f, wall_nx_u,
-                                       wall_ny_u, 0.0f);
+                int wallActiveFlags = (sector->flags & (8 | 16 | 256));
+                if (sector->flags & 128)
+                  wallActiveFlags |= (sector->flags & 7);
+                activate_normal_shader(
+                    upper_normal_tex, wall_tx_u, wall_ty_u, 0.0f, 0.0f, 0.0f,
+                    1.0f, wall_nx_u, wall_ny_u, 0.0f, wallActiveFlags,
+                    sector->liquid_intensity, sector->liquid_speed);
 
                 GPU_TriangleBatch(upper_tex, target, nvu, vu, niu, iu,
                                   GPU_BATCH_XYZ_ST);
@@ -1247,9 +1348,13 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
                 float wall_nx_l = (wall->y1 - wall->y2) / wall_len_l;
                 float wall_ny_l = (wall->x2 - wall->x1) / wall_len_l;
 
-                activate_normal_shader(lower_normal_tex, wall_tx_l, wall_ty_l,
-                                       0.0f, 0.0f, 0.0f, 1.0f, wall_nx_l,
-                                       wall_ny_l, 0.0f);
+                int wallActiveFlags = (sector->flags & (8 | 16 | 256));
+                if (sector->flags & 128)
+                  wallActiveFlags |= (sector->flags & 7);
+                activate_normal_shader(
+                    lower_normal_tex, wall_tx_l, wall_ty_l, 0.0f, 0.0f, 0.0f,
+                    1.0f, wall_nx_l, wall_ny_l, 0.0f, wallActiveFlags,
+                    sector->liquid_intensity, sector->liquid_speed);
 
                 GPU_TriangleBatch(lower_tex, target, nvl, vl, nil, il,
                                   GPU_BATCH_XYZ_ST);
@@ -1379,37 +1484,53 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
         GPU_SetImageFilter(_tex, GPU_FILTER_LINEAR);                           \
         GPU_SetWrapMode(_tex, GPU_WRAP_REPEAT, GPU_WRAP_REPEAT);               \
         GPU_Image *_norm = get_gpu_texture(0, normal_id);                      \
-        activate_normal_shader(_norm, wall_tx_m, wall_ty_m, 0.0f, 0.0f, 0.0f,  \
-                               1.0f, wall_nx_m, wall_ny_m, 0.0f);              \
-        int _nvCount = 0;                                                      \
-        float _h_bot = (z_bot_abs) - s_cam_z;                                  \
-        float _h_top = (z_top_abs) - s_cam_z;                                  \
-        float _v_top = 0.0f;                                                   \
-        float _v_bot = 1.0f;                                                   \
-        for (int ci = 0; ci < num_cols; ci++) {                                \
-          float _sx = (float)(col0 + ci);                                      \
-          float _tz = tz_vals[ci];                                             \
-          float _u = u_vals[ci];                                               \
-          float _sz = depth_from_tz(_tz);                                      \
-          float _y_top = (float)s_horizon - (_h_top * s_focal / _tz);          \
-          float _y_bot = (float)s_horizon - (_h_bot * s_focal / _tz);          \
-          v_w[_nvCount * 5 + 0] = _sx;                                         \
-          v_w[_nvCount * 5 + 1] = _y_top;                                      \
-          v_w[_nvCount * 5 + 2] = _sz;                                         \
-          v_w[_nvCount * 5 + 3] = _u;                                          \
-          v_w[_nvCount * 5 + 4] = _v_top;                                      \
-          _nvCount++;                                                          \
-          v_w[_nvCount * 5 + 0] = _sx;                                         \
-          v_w[_nvCount * 5 + 1] = _y_bot;                                      \
-          v_w[_nvCount * 5 + 2] = _sz;                                         \
-          v_w[_nvCount * 5 + 3] = _u;                                          \
-          v_w[_nvCount * 5 + 4] = _v_bot;                                      \
-          _nvCount++;                                                          \
+        int is_fluid = (sector->flags & 128) != 0;                             \
+        if ((transparent_pass && is_fluid) ||                                  \
+            (!transparent_pass && !is_fluid)) {                                \
+          if (transparent_pass) {                                              \
+            glDepthMask(GL_FALSE);                                             \
+            GPU_SetBlendMode(_tex, GPU_BLEND_NORMAL);                          \
+          }                                                                    \
+          int activeFlags =                                                    \
+              (sector->flags & (24 | 256)); /* Scroll & Ripples */             \
+          if (is_fluid)                                                        \
+            activeFlags |= (sector->flags & 7);                                \
+          activate_normal_shader(_norm, wall_tx_m, wall_ty_m, 0.0f, 0.0f,      \
+                                 0.0f, 1.0f, wall_nx_m, wall_ny_m, 0.0f,       \
+                                 activeFlags, sector->liquid_intensity,        \
+                                 sector->liquid_speed);                        \
+          int _nvCount = 0;                                                    \
+          float _h_bot = (z_bot_abs) - s_cam_z;                                \
+          float _h_top = (z_top_abs) - s_cam_z;                                \
+          float _v_top = 0.0f;                                                 \
+          float _v_bot = 1.0f;                                                 \
+          for (int ci = 0; ci < num_cols; ci++) {                              \
+            float _sx = (float)(col0 + ci);                                    \
+            float _tz = tz_vals[ci];                                           \
+            float _u = u_vals[ci];                                             \
+            float _sz = depth_from_tz(_tz);                                    \
+            float _y_top = (float)s_horizon - (_h_top * s_focal / _tz);        \
+            float _y_bot = (float)s_horizon - (_h_bot * s_focal / _tz);        \
+            v_w[_nvCount * 5 + 0] = _sx;                                       \
+            v_w[_nvCount * 5 + 1] = _y_top;                                    \
+            v_w[_nvCount * 5 + 2] = _sz;                                       \
+            v_w[_nvCount * 5 + 3] = _u;                                        \
+            v_w[_nvCount * 5 + 4] = _v_top;                                    \
+            _nvCount++;                                                        \
+            v_w[_nvCount * 5 + 0] = _sx;                                       \
+            v_w[_nvCount * 5 + 1] = _y_bot;                                    \
+            v_w[_nvCount * 5 + 2] = _sz;                                       \
+            v_w[_nvCount * 5 + 3] = _u;                                        \
+            v_w[_nvCount * 5 + 4] = _v_bot;                                    \
+            _nvCount++;                                                        \
+          }                                                                    \
+          GPU_TriangleBatch(_tex, target, _nvCount, v_w, ni, i_w,              \
+                            GPU_BATCH_XYZ_ST);                                 \
+          GPU_FlushBlitBuffer();                                               \
+          deactivate_normal_shader();                                          \
+          if (transparent_pass)                                                \
+            glDepthMask(GL_TRUE);                                              \
         }                                                                      \
-        GPU_TriangleBatch(_tex, target, _nvCount, v_w, ni, i_w,                \
-                          GPU_BATCH_XYZ_ST);                                   \
-        GPU_FlushBlitBuffer();                                                 \
-        deactivate_normal_shader();                                            \
       }                                                                        \
     }                                                                          \
   } while (0)
@@ -1449,8 +1570,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     if (depth > 0 && fabsf(sector->ceiling_z - parent_floor_z) < 0.1f) {
       render_ceil = 0;
     }
-    /* Elevation detection: If our floor is at parent's ceiling height, it's an
-     * opening. Don't render the bottom lid. */
+    /* Elevation detection: If our floor is at parent's ceiling height, it's
+     * an opening. Don't render the bottom lid. */
     if (depth > 0 && fabsf(sector->floor_z - parent_ceil_z) < 0.1f) {
       render_floor = 0;
     }
@@ -1494,7 +1615,7 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
         }
       }
       render_sector_gpu(target, child_id, clip, depth + 1, child_is_island,
-                        sector->floor_z, sector->ceiling_z);
+                        sector->floor_z, sector->ceiling_z, transparent_pass);
       GPU_SetClip(target, (Sint16)clip.x1, (Sint16)clip.y1,
                   (Uint16)(clip.x2 - clip.x1), (Uint16)(clip.y2 - clip.y1));
     }
@@ -2185,11 +2306,12 @@ void ray_render_scene_gpu(GPU_Target *target, int current_sector) {
   }
   glClear(GL_DEPTH_BUFFER_BIT);
 
-  /* 2. RENDER STATIC GEOMETRY (Walls/Planes) */
-  visited_clear();
   ClipRect full_clip = {0, 0, (float)s_screen_w, (float)s_screen_h};
+
+  /* Pass 0: Opaque geometry */
+  visited_clear();
   render_sector_gpu(target, current_sector, full_clip, 0, 0, -99999.0f,
-                    99999.0f);
+                    99999.0f, 0);
 
   /* Flush walls to depth buffer before sprites */
   GPU_FlushBlitBuffer();
@@ -2202,33 +2324,37 @@ void ray_render_scene_gpu(GPU_Target *target, int current_sector) {
   glEnable(GL_DEPTH_TEST);
   glDepthMask(GL_TRUE);
   glDepthFunc(GL_LEQUAL);
-  /* DO NOT clear depth here so models/sprites interact with world geometry */
-  // glClear(GL_DEPTH_BUFFER_BIT);
 
   /* Pre-calculate distances for sorting */
-  if (g_engine.num_sprites <= 0)
-    return;
+  if (g_engine.num_sprites > 0) {
+    RAY_Sprite **sorted_ptrs =
+        (RAY_Sprite **)malloc(g_engine.num_sprites * sizeof(RAY_Sprite *));
+    if (sorted_ptrs) {
+      for (int i = 0; i < g_engine.num_sprites; i++) {
+        float dx = g_engine.sprites[i].x - s_cam_x;
+        float dy = g_engine.sprites[i].y - s_cam_y;
+        g_engine.sprites[i].distance = sqrtf(dx * dx + dy * dy);
+        sorted_ptrs[i] = &g_engine.sprites[i];
+      }
 
-  RAY_Sprite **sorted_ptrs =
-      (RAY_Sprite **)malloc(g_engine.num_sprites * sizeof(RAY_Sprite *));
-  if (!sorted_ptrs)
-    return;
+      /* Sort the pointer list, not the main array! */
+      qsort(sorted_ptrs, g_engine.num_sprites, sizeof(RAY_Sprite *),
+            sprite_ptr_sorter_gpu);
 
-  for (int i = 0; i < g_engine.num_sprites; i++) {
-    float dx = g_engine.sprites[i].x - s_cam_x;
-    float dy = g_engine.sprites[i].y - s_cam_y;
-    g_engine.sprites[i].distance = sqrtf(dx * dx + dy * dy);
-    sorted_ptrs[i] = &g_engine.sprites[i];
+      for (int i = 0; i < g_engine.num_sprites; i++) {
+        render_sprite_gpu(target, sorted_ptrs[i]);
+      }
+      free(sorted_ptrs);
+    }
   }
 
-  /* Sort the pointer list, not the main array! */
-  qsort(sorted_ptrs, g_engine.num_sprites, sizeof(RAY_Sprite *),
-        sprite_ptr_sorter_gpu);
+  GPU_FlushBlitBuffer();
 
-  for (int i = 0; i < g_engine.num_sprites; i++) {
-    render_sprite_gpu(target, sorted_ptrs[i]);
-  }
-  free(sorted_ptrs);
+  /* Pass 1: Transparent liquids (Drawn after sprites so they can be seen
+   * through) */
+  visited_clear();
+  render_sector_gpu(target, current_sector, full_clip, 0, 0, -99999.0f,
+                    99999.0f, 1);
 
   GPU_FlushBlitBuffer();
   GPU_SetDepthTest(target, 0);

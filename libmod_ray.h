@@ -39,6 +39,17 @@
 #define RAY_EPSILON 0.1f
 #define RAY_INFINITY 1000000.0f
 
+/* Sector Flags for Liquids and special effects */
+#define RAY_SECTOR_FLAG_WATER 1
+#define RAY_SECTOR_FLAG_LAVA 2
+#define RAY_SECTOR_FLAG_ACID 4
+#define RAY_SECTOR_FLAG_SCROLL_X 8
+#define RAY_SECTOR_FLAG_SCROLL_Y 16
+#define RAY_SECTOR_FLAG_LIQUID_FLOOR 32
+#define RAY_SECTOR_FLAG_LIQUID_CEILING 64
+#define RAY_SECTOR_FLAG_LIQUID_WALLS 128
+#define RAY_SECTOR_FLAG_RIPPLES 256
+
 /* ============================================================================
    ESTRUCTURAS BÁSICAS
    ============================================================================
@@ -141,6 +152,10 @@ typedef struct {
   /* Optimization: AABB (Axis Aligned Bounding Box) */
   float min_x, min_y;
   float max_x, max_y;
+
+  int flags;              /* Sector flags (Liquid types, etc.) */
+  float liquid_intensity; /* Intensity of the distortion effect (0.0 to 1.0+) */
+  float liquid_speed;     /* Speed of the distortion/ripples (0.0 to 10.0+) */
 } RAY_Sector;
 
 /* ============================================================================
@@ -375,6 +390,7 @@ typedef struct {
 
   /* Inicializado */
   int initialized;
+  float time;          /* Tiempo global para shaders */
   uint32_t last_ticks; /* Para cálculo de delta time en animaciones */
 } RAY_Engine;
 

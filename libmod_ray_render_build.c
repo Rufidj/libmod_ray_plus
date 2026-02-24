@@ -75,6 +75,13 @@ static int32_t
     gr_put_pixel(g, x, y, c);                                                  \
   }
 
+#define FAST_GET_PIXEL(g, x, y)                                                \
+  (((g)->surface && (x) >= 0 && (x) < (g)->width && (y) >= 0 &&                \
+    (y) < (g)->height)                                                         \
+       ? ((uint32_t *)(g)                                                      \
+              ->surface->pixels)[(y) * ((g)->surface->pitch >> 2) + (x)]       \
+       : gr_get_pixel(g, (int64_t)x, (int64_t)y))
+
 /* Helper to commit changes to GPU */
 static void frame_commit(GRAPH *dest) {
   if (dest->surface) {
@@ -389,9 +396,10 @@ static void draw_sky_column(GRAPH *dest, int x, int y_start, int y_end) {
 // Helper to draw a vertical column of floor/ceiling
 // flags: 0 = Normal, 1 = Clear Z (Hole Punch) - Resets Z to infinity for passed
 // pixels Helper to draw a vertical column of floor/ceiling
-
 static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
-                              float height_diff, GRAPH *texture, int flags) {
+                              float height_diff, GRAPH *texture, int flags,
+                              float u_off, float v_off, int sector_flags,
+                              float liquid_intensity, float liquid_speed) {
   if (y_start > y_end)
     return;
 
@@ -400,7 +408,7 @@ static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
     if (flags & 1) {
       // Hole Punch: Just clear Z
       for (int y = y_start; y <= y_end; y++) {
-        g_zbuffer[y * g_engine.displayWidth + x] = RAY_INFINITY;
+        g_zbuffer[ylookup[y] + x] = RAY_INFINITY;
       }
     } else {
       // Draw Sky or Fallback Gray
@@ -491,8 +499,28 @@ static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
     // Texture mapping
     float scale = z_depth / view_dist;
 
-    float map_x = g_engine.camera.x + ray_dir_x * scale;
-    float map_y = g_engine.camera.y + ray_dir_y * scale;
+    float map_x = g_engine.camera.x + ray_dir_x * scale + u_off;
+    float map_y = g_engine.camera.y + ray_dir_y * scale + v_off;
+
+    // Fluid distortion
+    if ((sector_flags & 7) && (sector_flags & 256)) {
+      float intensity = liquid_intensity;
+      if (intensity < 0.001f)
+        intensity = 1.0f;
+      float speed = liquid_speed;
+      float t = g_engine.time * speed;
+
+      if (sector_flags & 1) { // Water
+        map_x += sinf(map_y * 0.1f + t * 3.0f) * 16.0f * intensity;
+        map_y += cosf(map_x * 0.1f + t * 2.5f) * 16.0f * intensity;
+      } else if (sector_flags & 2) { // Lava
+        map_x += sinf(map_y * 0.05f + t * 1.5f) * 24.0f * intensity;
+        map_y += cosf(map_x * 0.05f + t * 1.2f) * 24.0f * intensity;
+      } else if (sector_flags & 4) { // Acid
+        map_x += sinf(map_y * 0.2f + t * 6.0f) * 8.0f * intensity;
+        map_y += cosf(map_x * 0.2f + t * 6.0f) * 8.0f * intensity;
+      }
+    }
 
     int tex_w = texture->width;
     int tex_h = texture->height;
@@ -513,6 +541,13 @@ static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
       pixel = ray_fog_pixel(pixel, z_depth);
     }
 
+    // TRANSPARENCY: Blend if it's a fluid
+    if (sector_flags & 7) {
+      uint32_t bg = FAST_GET_PIXEL(dest, x, y);
+      // Rough 50/50 blend (0xFEFEFE avoids overflow bit bleeding)
+      pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
+    }
+
     // UNSAFE WRITE
     if (screen_ptr) {
       *screen_ptr = pixel;
@@ -525,12 +560,15 @@ static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
   }
 }
 
+// Helper to draw a vertical column of wall
+// sector flags (Liquid types)
+
 static void
 draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
                          int y1_floor, int y2_floor, float z1, float z2,
                          GRAPH *texture, float u1, float u2, RAY_Wall *wall,
                          RAY_Sector *sector, int clip_min_x, int clip_max_x,
-                         int flags) // flags: 1=WALL, 2=FLOOR_CEIL
+                         int flags, float u_off) // flags: 1=WALL, 2=FLOOR_CEIL
 {
   if (x1 > x2)
     return;
@@ -661,7 +699,23 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
       // Actually u is simply length if we assume 0..len mapping.
       // u = sqrt(dux*dux + duy*duy);
       // Better: use dot product to allow extrapolation if needed and avoid sqrt
-      u = (dux * wdx + duy * wdy) / sqrtf(wall_len_sq);
+      u = (dux * wdx + duy * wdy) / sqrtf(wall_len_sq) + u_off;
+
+      // Wall fluid distortion
+      if ((sector->flags & 128) && (sector->flags & 256)) {
+        float intensity = sector->liquid_intensity;
+        if (intensity < 0.001f)
+          intensity = 1.0f;
+        float speed = sector->liquid_speed;
+        float t = g_engine.time * speed;
+
+        if (sector->flags & 1) // Water
+          u += sinf(curr_y_ceil * 0.05f + t * 3.0f) * 16.0f * intensity;
+        else if (sector->flags & 2) // Lava
+          u += sinf(curr_y_ceil * 0.02f + t * 1.5f) * 24.0f * intensity;
+        else if (sector->flags & 4) // Acid
+          u += sinf(curr_y_ceil * 0.1f + t * 6.0f) * 8.0f * intensity;
+      }
     } else {
       // Parallel ray? Use interpolated U as fallback
       u = curr_u_over_z * z;
@@ -743,9 +797,15 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
               cached_pixel = pixel;
             }
 
-            if ((pixel & 0xFF000000) != 0) { // Simple alpha check
+            if ((pixel & 0xff000000) != 0) { // Simple alpha check
               if (g_engine.fogOn)
                 pixel = ray_fog_pixel(pixel, z);
+
+              // TRANSPARENCY: Blend if it's a fluid wall
+              if (sector->flags & 7) {
+                uint32_t bg = FAST_GET_PIXEL(dest, x, y);
+                pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
+              }
 
               // UNSAFE DIRECT WRITE vs STANDARD
               if (screen_ptr) {
@@ -753,6 +813,9 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
               } else {
                 FAST_PUT_PIXEL(dest, x, y, pixel);
               }
+              // Only write Z if NOT a fluid (or if we want fluids to be
+              // occluded but not occlude?) For now, let's write Z so sprites
+              // behind are correctly occluded
               g_zbuffer[pixel_idx] = z; // Write Z
             }
           }
@@ -822,9 +885,19 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
           ceil_tex = bitmap_get(g_engine.fpg_id, sector->ceiling_texture_id);
         // Call even if NULL to support Skybox
         float ceil_h = sector->ceiling_z - g_engine.camera.z;
-        if (!g_render_island_mode)
+        float cu_off = 0, cv_off = 0;
+        if (sector->flags & 64) {
+          if (sector->flags & 8)
+            cu_off = g_engine.time * 64.0f;
+          if (sector->flags & 16)
+            cv_off = g_engine.time * 64.0f;
+        }
+        if (!g_render_island_mode) {
+          int sflags = (sector->flags & 64) ? (sector->flags & (7 | 256)) : 0;
           draw_plane_column(dest, x, draw_c_start, draw_c_end, ceil_h, ceil_tex,
-                            0);
+                            0, cu_off, cv_off, sflags, sector->liquid_intensity,
+                            sector->liquid_speed);
+        }
       }
 
       // Draw Floor (y_bot + 1 to H - 1)
@@ -842,9 +915,19 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
           floor_tex = bitmap_get(g_engine.fpg_id, sector->floor_texture_id);
         // Call even if NULL to support Skybox
         float floor_h = sector->floor_z - g_engine.camera.z;
-        if (!g_render_island_mode)
+        float u_off = 0, v_off = 0;
+        if (sector->flags & 32) {
+          if (sector->flags & 8)
+            u_off = g_engine.time * 64.0f;
+          if (sector->flags & 16)
+            v_off = g_engine.time * 64.0f;
+        }
+        if (!g_render_island_mode) {
+          int sflags = (sector->flags & 32) ? (sector->flags & (7 | 256)) : 0;
           draw_plane_column(dest, x, draw_f_start, draw_f_end, floor_h,
-                            floor_tex, 0);
+                            floor_tex, 0, u_off, v_off, sflags,
+                            sector->liquid_intensity, sector->liquid_speed);
+        }
       }
     }
 
@@ -1235,7 +1318,8 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
           // We use a simplified constant height plane drawer for now
           // Ideally we need perspective correct u/v mapping for the lid surface
           draw_plane_column(dest, x, draw_l_start, draw_l_end, sect_ceil,
-                            ceil_tex, 0);
+                            ceil_tex, 0, 0, 0, sector->flags,
+                            sector->liquid_intensity, sector->liquid_speed);
         }
       }
 
@@ -1264,7 +1348,8 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
 
         if (draw_l_end >= draw_l_start) {
           draw_plane_column(dest, x, draw_l_start, draw_l_end, sect_floor,
-                            floor_tex, 0);
+                            floor_tex, 0, 0, 0, sector->flags,
+                            sector->liquid_intensity, sector->liquid_speed);
         }
       }
     }
@@ -1374,7 +1459,7 @@ static void render_hole_stencil(GRAPH *dest, int sector_id, int min_x,
       if (draw_l_end >= draw_l_start) {
         // Flag 1 = Clear Z / Stencil
         draw_plane_column(dest, x, draw_l_start, draw_l_end, sect_ceil,
-                          ceil_tex, 1);
+                          ceil_tex, 1, 0, 0, 0, 0.0f, 1.0f);
       }
     }
   }
@@ -1544,7 +1629,10 @@ static void render_solid_lids(GRAPH *dest, int sector_id, int min_x,
         int draw_e = (lid_end > max_y) ? max_y : lid_end;
 
         if (draw_e >= draw_s) {
-          draw_plane_column(dest, x, draw_s, draw_e, sect_ceil, ceil_tex, 0);
+          int sflags = (sector->flags & 64) ? (sector->flags & (7 | 256)) : 0;
+          draw_plane_column(dest, x, draw_s, draw_e, sect_ceil, ceil_tex, 0, 0,
+                            0, sflags, sector->liquid_intensity,
+                            sector->liquid_speed);
         }
       }
 
@@ -1566,7 +1654,10 @@ static void render_solid_lids(GRAPH *dest, int sector_id, int min_x,
         int draw_e = (lid_end > max_y) ? max_y : lid_end;
 
         if (draw_e >= draw_s) {
-          draw_plane_column(dest, x, draw_s, draw_e, sect_floor, floor_tex, 0);
+          int sflags = (sector->flags & 32) ? (sector->flags & (7 | 256)) : 0;
+          draw_plane_column(dest, x, draw_s, draw_e, sect_floor, floor_tex, 0,
+                            0, 0, sflags, sector->liquid_intensity,
+                            sector->liquid_speed);
         }
       }
     }
@@ -1707,6 +1798,11 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
     int draw_flags = 3; // Default: Wall + Floor/Ceil
     if (is_island) {
       draw_flags = 1; // Wall Only
+    }
+
+    float u_off = 0.0f;
+    if ((sector->flags & 128) && (sector->flags & 8)) {
+      u_off = g_engine.time * 64.0f;
     }
 
     // Is this a portal?
@@ -2026,8 +2122,8 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
         draw_wall_segment_linear(
             dest, sx1, sx2, y1_top, y2_top, // Top of screen (current ceil)
             ny1_top, ny2_top,               // Bottom of step (next ceil)
-            z1, z2, upper_tex, u1, u2, wall, sector, min_x, max_x,
-            1); // flag 1 = WALL ONLY (no floor/ceil)
+            z1, z2, upper_tex, u1, u2, wall, sector, min_x, max_x, 1,
+            u_off); // flag 1 = WALL ONLY (no floor/ceil)
       }
 
       // Draw Lower Step (Floor transition)
@@ -2039,8 +2135,8 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
         draw_wall_segment_linear(
             dest, sx1, sx2, ny1_bot, ny2_bot, // Top of step (next floor)
             y1_bot, y2_bot, // Bottom of screen (current floor)
-            z1, z2, lower_tex, u1, u2, wall, sector, min_x, max_x,
-            1); // flag 1 = WALL ONLY
+            z1, z2, lower_tex, u1, u2, wall, sector, min_x, max_x, 1,
+            u_off); // flag 1 = WALL ONLY
       }
     }
 
@@ -2051,13 +2147,13 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
 
       draw_wall_segment_linear(dest, sx1, sx2, y1_top, y2_top, y1_bot, y2_bot,
                                z1, z2, texture, u1, u2, wall, sector, min_x,
-                               max_x,
-                               draw_flags); // USE draw_flags HERE (was 3)
+                               max_x, draw_flags,
+                               u_off); // USE draw_flags HERE (was 3)
     } else {
       // Portal - draw ONLY floor and ceiling
       draw_wall_segment_linear(dest, sx1, sx2, y1_top, y2_top, y1_bot, y2_bot,
                                z1, z2, NULL, 0, 0, wall, sector, min_x, max_x,
-                               2); // flag 2 = FLOOR/CEIL ONLY (skip wall)
+                               2, 0); // flag 2 = FLOOR/CEIL ONLY (skip wall)
 
       // CEILING GAP FILL for nested sectors
       // Only draw when rendering FROM the parent sector, not from the child
@@ -2080,7 +2176,7 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
         if (gap_texture) {
           draw_wall_segment_linear(dest, sx1, sx2, y1_top, y2_top, ny1_top,
                                    ny2_top, z1, z2, gap_texture, u1, u2, wall,
-                                   sector, min_x, max_x, 1);
+                                   sector, min_x, max_x, 1, u_off);
         }
       }
     }

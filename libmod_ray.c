@@ -777,13 +777,22 @@ int64_t libmod_ray_render(INSTANCE *my, int64_t *params) {
 
   /* Automatic animation update logic */
   uint32_t current_ticks = SDL_GetTicks();
-  float dt = (g_engine.last_ticks > 0)
-                 ? (current_ticks - g_engine.last_ticks) / 1000.0f
-                 : 0.016f;
+  float dt = 0.0f;
+  if (g_engine.last_ticks > 0) {
+    uint32_t diff = current_ticks - g_engine.last_ticks;
+    if (diff == 0)
+      dt = 0.001f; /* Force minimum progression for high-FPS */
+    else
+      dt = diff / 1000.0f;
+  } else {
+    dt = 0.016f;
+  }
   g_engine.last_ticks = current_ticks;
 
   if (dt > 0.1f)
     dt = 0.1f; /* Cap large drops */
+
+  g_engine.time += dt;
 
   for (int i = 0; i < g_engine.num_sprites; ++i) {
     RAY_Sprite *s = &g_engine.sprites[i];

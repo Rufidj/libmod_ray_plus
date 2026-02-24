@@ -187,8 +187,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     return 0;
 
   int map_version = header->version;
-  if (map_version < 9 || map_version > 26) {
-    printf("RAY: ERROR - Map version %d not supported by this engine (9-26 "
+  if (map_version < 9 || map_version > 27) {
+    printf("RAY: ERROR - Map version %d not supported by this engine (9-27 "
            "only)\n",
            map_version);
     return 0;
@@ -257,9 +257,21 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
 
     /* v22+: Sector flags */
     if (map_version >= 22) {
-      int sector_flags = 0;
-      (void)fread(&sector_flags, sizeof(int), 1, file);
-      // Motor doesn't use sector flags yet, just skip
+      (void)fread(&s->flags, sizeof(int), 1, file);
+    } else {
+      s->flags = 0;
+    }
+
+    /* v26+: Liquid settings */
+    if (map_version >= 26) {
+      (void)fread(&s->liquid_intensity, sizeof(float), 1, file);
+    } else {
+      s->liquid_intensity = 1.0f;
+    }
+    if (map_version >= 27) {
+      (void)fread(&s->liquid_speed, sizeof(float), 1, file);
+    } else {
+      s->liquid_speed = 1.0f;
     }
 
     printf("RAY: Loading sector %d: floor_z=%.1f, ceiling_z=%.1f\n",
