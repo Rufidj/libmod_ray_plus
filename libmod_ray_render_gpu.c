@@ -326,15 +326,26 @@ static void activate_normal_shader(GPU_Image *normalMap, float tx, float ty,
   GPU_SetUniformf(s_u_halfW, (float)s_half_w);
   GPU_SetUniformf(s_u_horizon, (float)s_horizon);
 
-  /* Transform main Normal to View Space too! */
+  /* Transform TBN Matrix to View Space */
+  /* World vectors (nx, ny, tx, ty, bx, by) -> View space (X=Right, Z=Forward)
+   */
+  /* Y_view (Up) maps directly from Z_world */
+
+  float vtx = tx * s_sin_ang - ty * s_cos_ang;
+  float vty = tz;
+  float vtz = tx * s_cos_ang + ty * s_sin_ang;
+
+  float vbx = bx * s_sin_ang - by * s_cos_ang;
+  float vby = bz;
+  float vbz = bx * s_cos_ang + by * s_sin_ang;
+
   float vnx = nx * s_sin_ang - ny * s_cos_ang;
-  float vny = nz; /* Up is still Up if we don't have pitch transformation for
-                     normals yet */
+  float vny = nz;
   float vnz = nx * s_cos_ang + ny * s_sin_ang;
 
-  float t[3] = {tx, ty, tz};
+  float t[3] = {vtx, vty, vtz};
   GPU_SetUniformfv(s_u_tangent, 3, 1, t);
-  float b[3] = {bx, by, bz};
+  float b[3] = {vbx, vby, vbz};
   GPU_SetUniformfv(s_u_bitangent, 3, 1, b);
   float n[3] = {vnx, vny, vnz};
   GPU_SetUniformfv(s_u_normal, 3, 1, n);
@@ -1373,8 +1384,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
         int _nvCount = 0;                                                      \
         float _h_bot = (z_bot_abs) - s_cam_z;                                  \
         float _h_top = (z_top_abs) - s_cam_z;                                  \
-        float _v_top = (z_top_abs) / 128.0f;                                   \
-        float _v_bot = (z_bot_abs) / 128.0f;                                   \
+        float _v_top = 0.0f;                                                   \
+        float _v_bot = 1.0f;                                                   \
         for (int ci = 0; ci < num_cols; ci++) {                                \
           float _sx = (float)(col0 + ci);                                      \
           float _tz = tz_vals[ci];                                             \
