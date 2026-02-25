@@ -744,19 +744,6 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
         int last_tex_y = -999;
         uint32_t cached_pixel = 0;
 
-        // SAFETY: Check Surface
-        // if (!dest->surface) continue;
-
-        // SAFETY: Bounds
-        if (x < 0 || x >= g_engine.displayWidth)
-          continue;
-        if (draw_top < 0)
-          draw_top = 0;
-        if (draw_bot >= g_engine.displayHeight)
-          draw_bot = g_engine.displayHeight - 1;
-
-        // No Lock/Direct Ptr
-
         // FIXED POINT SETUP (16.16)
         int32_t v_step_fp = (int32_t)(v_step * 65536.0f);
         int32_t curr_v_fp = (int32_t)(curr_v * 65536.0f);
@@ -771,78 +758,48 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
         }
 
         for (int y = draw_top; y <= draw_bot; y++) {
-          // Z-Buffer check (Index is fast)
           int pixel_idx = ylookup[y] + x;
 
-          if (z < g_zbuffer[pixel_idx]) {
-            // FIXED POINT SHIFT
-            int tex_y = curr_v_fp >> 16;
+          // TILING: Use modulo
+          int tex_y = (curr_v_fp >> 16) % texture->height;
+          if (tex_y < 0)
+            tex_y += texture->height;
 
-            if (tex_y < 0)
-              tex_y = 0;
-            else if (tex_y >= texture->height)
-              tex_y = texture->height - 1;
-
-            uint32_t pixel;
-            if (tex_y == last_tex_y && g_engine.texture_quality == 0) {
-              pixel = cached_pixel;
+          uint32_t pixel;
+          if (tex_y == last_tex_y && g_engine.texture_quality == 0) {
+            pixel = cached_pixel;
+          } else {
+            if (g_engine.texture_quality == 1) {
+              pixel = ray_sample_texture_bilinear(texture, u, curr_v);
             } else {
-              // SAFE TEXTURE READ
-              if (g_engine.texture_quality == 1) {
-                pixel = ray_sample_texture_bilinear(texture, u, curr_v);
-              } else {
-                pixel = gr_get_pixel(texture, tex_x, tex_y);
-              }
-              last_tex_y = tex_y;
-              cached_pixel = pixel;
+              pixel = gr_get_pixel(texture, tex_x, tex_y);
             }
-
-            if ((pixel & 0xff000000) != 0) { // Simple alpha check
-              if (g_engine.fogOn)
-                pixel = ray_fog_pixel(pixel, z);
-
-              // TRANSPARENCY: Blend if it's a fluid wall
-              if (sector->flags & 7) {
-                uint32_t bg = FAST_GET_PIXEL(dest, x, y);
-                pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
-              }
-
-              // UNSAFE DIRECT WRITE vs STANDARD
-              if (screen_ptr) {
-                *screen_ptr = pixel; // NO CHECKS
-              } else {
-                FAST_PUT_PIXEL(dest, x, y, pixel);
-              }
-              // Only write Z if NOT a fluid (or if we want fluids to be
-              // occluded but not occlude?) For now, let's write Z so sprites
-              // behind are correctly occluded
-              g_zbuffer[pixel_idx] = z; // Write Z
-            }
+            last_tex_y = tex_y;
+            cached_pixel = pixel;
           }
-          // FIXED POINT ADD
+
+          if ((pixel & 0xff000000) != 0) {
+            if (g_engine.fogOn)
+              pixel = ray_fog_pixel(pixel, z);
+
+            if (sector->flags & 7) {
+              uint32_t bg = FAST_GET_PIXEL(dest, x, y);
+              pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
+            }
+
+            if (screen_ptr) {
+              *screen_ptr = pixel;
+            } else {
+              FAST_PUT_PIXEL(dest, x, y, pixel);
+            }
+            g_zbuffer[pixel_idx] = z;
+          }
           curr_v_fp += v_step_fp;
           if (screen_ptr)
             screen_ptr += pitch_ints;
         }
-      } else if (draw_bot >= draw_top &&
-                 y_bot > y_top) { // Solid color fallback
+      } else if (draw_bot >= draw_top && y_bot > y_top) { // Solid fallback
         uint32_t color = 0xFF808080;
-
-        // SAFETY: Check Surface
-        if (!dest->surface)
-          continue;
-
-        // SAFETY: Bounds
-        if (x < 0 || x >= g_engine.displayWidth)
-          continue;
-        if (draw_top < 0)
-          draw_top = 0;
-        if (draw_bot >= g_engine.displayHeight)
-          draw_bot = g_engine.displayHeight - 1;
-
-        // No Lock/Direct Ptr
-
-        // UNSAFE OPTIMIZATION: Get pointer if possible
         uint32_t *screen_ptr = NULL;
         int pitch_ints = 0;
         if (dest->surface) {
@@ -852,15 +809,12 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
         }
 
         for (int y = draw_top; y <= draw_bot; y++) {
-          // Z Check
-          // int pixel_idx = y * g_engine.displayWidth + x;
           int pixel_idx = ylookup[y] + x;
           if (z < g_zbuffer[pixel_idx]) {
-            if (screen_ptr) {
-              *screen_ptr = color; // UNSAFE WRITE
-            } else {
+            if (screen_ptr)
+              *screen_ptr = color;
+            else
               FAST_PUT_PIXEL(dest, x, y, color);
-            }
             g_zbuffer[pixel_idx] = z;
           }
           if (screen_ptr)
@@ -870,20 +824,28 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
     }
 
     if (flags & 2) {
-      // Draw Ceiling (0 to y_top - 1)
-      // Clipped: [min_y, min(max_y, y_top-1)]
-      int ceil_end = y_top - 1;
+      /* Fluid Ceiling */
+      int is_nested_hole =
+          (sector->parent_sector_id != -1 && !g_render_island_mode);
+      float r_ceil_h = sector->ceiling_z - g_engine.camera.z;
+      int y_real_ceil =
+          halfydimen - (int)roundf((r_ceil_h * (float)halfydimen) / z);
+
+      int ceil_end = is_nested_hole ? y_bot - 1 : y_top - 1;
       int draw_c_start = min_y;
+
+      // Rim gap fix: If lava ceiling is below ground level (y_top),
+      // we must NOT overwrite the wall in [y_top, y_real_ceil].
+      if (is_nested_hole && y_real_ceil > y_top) {
+        draw_c_start = (y_real_ceil < min_y) ? min_y : y_real_ceil;
+      }
       int draw_c_end = (ceil_end > max_y) ? max_y : ceil_end;
 
-      if (draw_c_end >= draw_c_start) { // Valid range
-        if (draw_c_start < 0)
-          draw_c_start = 0; // Sanity
-
+      if (draw_c_end >= draw_c_start) {
         GRAPH *ceil_tex = NULL;
         if (sector->ceiling_texture_id > 0)
           ceil_tex = bitmap_get(g_engine.fpg_id, sector->ceiling_texture_id);
-        // Call even if NULL to support Skybox
+
         float ceil_h = sector->ceiling_z - g_engine.camera.z;
         float cu_off = 0, cv_off = 0;
         if (sector->flags & 64) {
@@ -900,32 +862,32 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
         }
       }
 
-      // Draw Floor (y_bot + 1 to H - 1)
-      // Clipped: [max(min_y, y_bot+1), max_y]
-      int floor_start = y_bot + 1;
+      /* Fluid Floor */
+      float r_floor_h = sector->floor_z - g_engine.camera.z;
+      int y_real_floor =
+          halfydimen - (int)roundf((r_floor_h * (float)halfydimen) / z);
+
+      int floor_start = is_nested_hole ? y_real_floor : y_bot + 1;
       int draw_f_start = (floor_start < min_y) ? min_y : floor_start;
       int draw_f_end = max_y;
 
       if (draw_f_end >= draw_f_start) {
-        if (draw_f_end >= g_engine.displayHeight)
-          draw_f_end = g_engine.displayHeight - 1; // Sanity
-
         GRAPH *floor_tex = NULL;
         if (sector->floor_texture_id > 0)
           floor_tex = bitmap_get(g_engine.fpg_id, sector->floor_texture_id);
-        // Call even if NULL to support Skybox
+
         float floor_h = sector->floor_z - g_engine.camera.z;
-        float u_off = 0, v_off = 0;
+        float fu_off = 0, fv_off = 0;
         if (sector->flags & 32) {
           if (sector->flags & 8)
-            u_off = g_engine.time * 64.0f;
+            fu_off = g_engine.time * 64.0f;
           if (sector->flags & 16)
-            v_off = g_engine.time * 64.0f;
+            fv_off = g_engine.time * 64.0f;
         }
         if (!g_render_island_mode) {
           int sflags = (sector->flags & 32) ? (sector->flags & (7 | 256)) : 0;
           draw_plane_column(dest, x, draw_f_start, draw_f_end, floor_h,
-                            floor_tex, 0, u_off, v_off, sflags,
+                            floor_tex, 0, fu_off, fv_off, sflags,
                             sector->liquid_intensity, sector->liquid_speed);
         }
       }
@@ -939,8 +901,8 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
 }
 
 // Render a convex solid sector (e.g. column, box) by casting rays for every
-// screen column finding entry (front wall) and exit (back wall) points to draw
-// the precise volume.
+// screen column finding entry (front wall) and exit (back wall) points to
+// draw the precise volume.
 static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
                                 int max_x) {
 
@@ -1073,9 +1035,9 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
         // visible)
         t_near = 0.1f;
         // If t is small, Height/t is HUGE.
-        // If sect_ceil > 0 (below cam), y = half - HUGE = -HUGE (Top of screen
-        // clipped) If sect_ceil < 0 (above cam), y = half - (-HUGE) = +HUGE
-        // (Bottom of screen clipped)
+        // If sect_ceil > 0 (below cam), y = half - HUGE = -HUGE (Top of
+        // screen clipped) If sect_ceil < 0 (above cam), y = half - (-HUGE) =
+        // +HUGE (Bottom of screen clipped)
 
         // We clamp to avoid integer logic breaking
         if (sect_ceil > 0)
@@ -1149,8 +1111,8 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
         int far_y1 = halfydimen - (int)((sect_ceil * halfydimen) / t_far);
         int far_y2 = halfydimen - (int)((sect_floor * halfydimen) / t_far);
 
-        // We will verify Z-Buffer only for far wall (since near wall is always
-        // in front) Actually near wall steps occlude far wall.
+        // We will verify Z-Buffer only for far wall (since near wall is
+        // always in front) Actually near wall steps occlude far wall.
       } else {
         // Not a portal transparency, draw full near wall
         y_window_top = y_near_bot; // No Window
@@ -1163,10 +1125,10 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
           wall_tex =
               bitmap_get(g_engine.fpg_id, draw_wall_near->texture_id_middle);
 
-        // We draw in two segments: Top Step [y_near_top, y_window_top] and Bot
-        // Step [y_window_bot, y_near_bot] But simplified: Just mask out the
-        // window? Scanline approach: Loop y_near_top to y_near_bot. If y inside
-        // window, skip (or draw far).
+        // We draw in two segments: Top Step [y_near_top, y_window_top] and
+        // Bot Step [y_window_bot, y_near_bot] But simplified: Just mask out
+        // the window? Scanline approach: Loop y_near_top to y_near_bot. If y
+        // inside window, skip (or draw far).
 
         // Optimize: Loop 1 (Top Step)
         int step_draw_start = (y_near_top < min_y) ? min_y : y_near_top;
@@ -1316,7 +1278,8 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
 
         if (draw_l_end >= draw_l_start) {
           // We use a simplified constant height plane drawer for now
-          // Ideally we need perspective correct u/v mapping for the lid surface
+          // Ideally we need perspective correct u/v mapping for the lid
+          // surface
           draw_plane_column(dest, x, draw_l_start, draw_l_end, sect_ceil,
                             ceil_tex, 0, 0, 0, sector->flags,
                             sector->liquid_intensity, sector->liquid_speed);
@@ -1430,15 +1393,20 @@ static void render_hole_stencil(GRAPH *dest, int sector_id, int min_x,
       if (t_near < 0.1f)
         t_near = 0.1f;
 
-      // Project Ceiling height at Far and Near Z
-      // Project Ceiling height at Far and Near Z
-      // Use rounding to ensure we clear the pixels fully covering the hole
-      // This fixes "protruding" wall edges where truncation was leaving 1 pixel
-      // uncleared
-      int y_far_top =
-          halfydimen - (int)roundf((sect_ceil * halfydimen) / t_far);
+      /* Project Rim/Ceiling height. For holes, we use the higher of child
+         ceiling or parent floor to ensure we clear the entire opening in the
+         parent floor. */
+      float rim_z = sector->ceiling_z;
+      if (sector->parent_sector_id != -1) {
+        RAY_Sector *parent = &g_engine.sectors[sector->parent_sector_id];
+        if (parent->floor_z > rim_z)
+          rim_z = parent->floor_z;
+      }
+      float sect_rim = rim_z - cz;
+
+      int y_far_top = halfydimen - (int)roundf((sect_rim * halfydimen) / t_far);
       int y_near_top =
-          halfydimen - (int)roundf((sect_ceil * halfydimen) / t_near);
+          halfydimen - (int)roundf((sect_rim * halfydimen) / t_near);
 
       // Clipping
       int min_y = umost[x];
@@ -1453,44 +1421,32 @@ static void render_hole_stencil(GRAPH *dest, int sector_id, int min_x,
         lid_end = temp;
       }
 
+      /* Only reset Z to infinity where the hole lid is physically present.
+         Clearing the whole column breaks visibility of walls behind and
+         submerged parts. */
       int draw_l_start = (lid_start < min_y) ? min_y : lid_start;
       int draw_l_end = (lid_end > max_y) ? max_y : lid_end;
 
       if (draw_l_end >= draw_l_start) {
-        // Flag 1 = Clear Z / Stencil
-        draw_plane_column(dest, x, draw_l_start, draw_l_end, sect_ceil,
-                          ceil_tex, 1, 0, 0, 0, 0.0f, 1.0f);
+        /* Flag 1 = Clear Z / Stencil */
+        draw_plane_column(dest, x, draw_l_start, draw_l_end, 0.0f, NULL, 1, 0,
+                          0, 0, 0.0f, 1.0f);
       }
     }
   }
 
-  // Render nested children of solid sectors
-  printf("RAY: render_solid_sector(%d) checking children: num_children=%d\n",
-         sector->sector_id, ray_sector_get_num_children(sector));
-
   if (ray_sector_has_children(sector)) {
-    printf("RAY: render_solid_sector(%d) has %d children, rendering them now\n",
-           sector->sector_id, ray_sector_get_num_children(sector));
-
     for (int i = 0; i < ray_sector_get_num_children(sector); i++) {
       int child_id = ray_sector_get_child(sector, i);
       RAY_Sector *child = &g_engine.sectors[child_id];
 
-      printf("RAY: render_solid_sector(%d) processing child %d (solid=%d)\n",
-             sector->sector_id, child_id, ray_sector_is_solid(child));
-
       if (!ray_aabb_visible(child)) {
-        printf("RAY: Child %d not visible, skipping\n", child_id);
         continue;
       }
 
       if (ray_sector_is_solid(child)) {
-        printf("RAY: Calling render_solid_sector for child %d\n", child_id);
         render_solid_sector(dest, child_id, min_x, max_x);
       } else {
-        printf(
-            "RAY: Calling render_hole_stencil + render_sector for child %d\n",
-            child_id);
         render_hole_stencil(dest, child_id, min_x, max_x);
         render_sector(dest, child_id, min_x, max_x, 0, 0);
       }
@@ -1756,8 +1712,21 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
       continue;
 
     // Heights
-    float floor_h = sector->floor_z - g_engine.camera.z;
-    float ceil_h = sector->ceiling_z - g_engine.camera.z;
+    float fz = sector->floor_z;
+    float cz = sector->ceiling_z;
+
+    // For holes (non-island children), extend walls to parent height to fill
+    // "rim" gaps
+    if (!is_island && sector->parent_sector_id != -1) {
+      RAY_Sector *parent = &g_engine.sectors[sector->parent_sector_id];
+      if (parent->floor_z > cz)
+        cz = parent->floor_z;
+      if (parent->ceiling_z < fz)
+        fz = parent->ceiling_z;
+    }
+
+    float floor_h = fz - g_engine.camera.z;
+    float ceil_h = cz - g_engine.camera.z;
 
     // Calculate screen Y for top/bottom
     int y1_top = halfydimen - (int)((ceil_h * halfydimen) / z1);
@@ -1790,11 +1759,11 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
 
     // Determine render flags
     // If sector is solid (column/box), we ONLY want to draw the walls.
-    // Drawing floor/ceiling would fill the screen OUTSIDE the object (standard
-    // room behavior), which overwrites the parent sector. Note: This leaves
-    // solid objects without top/bottom caps (lids). Caps require polygon
-    // rendering inside the wall loop, which is not yet implemented. For
-    // wall-to-ceiling columns, this is perfect.
+    // Drawing floor/ceiling would fill the screen OUTSIDE the object
+    // (standard room behavior), which overwrites the parent sector. Note:
+    // This leaves solid objects without top/bottom caps (lids). Caps require
+    // polygon rendering inside the wall loop, which is not yet implemented.
+    // For wall-to-ceiling columns, this is perfect.
     int draw_flags = 3; // Default: Wall + Floor/Ceil
     if (is_island) {
       draw_flags = 1; // Wall Only
@@ -1835,8 +1804,8 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
       // The portal window is the intersection of the current sector's view
       // and the next sector's vertical opening.
       // Current sector vertical range is defined by y_top and y_bot
-      // (interpolated). Next sector vertical range "hole" is ny_top and ny_bot.
-      // Effectively, the new window is [max(y_curr, y_next_ceil),
+      // (interpolated). Next sector vertical range "hole" is ny_top and
+      // ny_bot. Effectively, the new window is [max(y_curr, y_next_ceil),
       // min(y_curr_floor, y_next_floor)]
 
       // Steps to interpolate
@@ -1869,8 +1838,8 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
         int cny_bot_next = (int)c_ny1b;
 
         // The hole begins at the lower of the two ceilings (visually higher Y
-        // value if looking down? No) Y increases downwards (0 is top). Ceiling
-        // is at Y=0...top. Floor is at Y=bot...H. Visible region is
+        // value if looking down? No) Y increases downwards (0 is top).
+        // Ceiling is at Y=0...top. Floor is at Y=bot...H. Visible region is
         // y_top...y_bot. The step blocks y_top...ny_top. So the new top is
         // max(y_top, ny_top).
         int new_top = (cy_top_curr > cny_top_next) ? cy_top_curr : cny_top_next;
@@ -2157,12 +2126,13 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
 
       // CEILING GAP FILL for nested sectors
       // Only draw when rendering FROM the parent sector, not from the child
-      // itself This prevents the gap fill from occluding the child's own walls
+      // itself This prevents the gap fill from occluding the child's own
+      // walls
       RAY_Sector *next_sector = &g_engine.sectors[next_sector_id];
       if (next_sector->parent_sector_id == sector->sector_id &&
           next_sector->ceiling_z < sector->ceiling_z &&
-          sector_id != next_sector_id) { // Don't draw gap when rendering child
-                                         // from inside
+          sector_id != next_sector_id) { // Don't draw gap when rendering
+                                         // child from inside
 
         float next_ceil_h = next_sector->ceiling_z - g_engine.camera.z;
         int ny1_top = halfydimen - (int)((next_ceil_h * halfydimen) / z1);
@@ -2233,6 +2203,12 @@ void render_sector(GRAPH *dest, int sector_id, int min_x, int max_x, int depth,
       int is_island_render = ray_sector_is_solid(child_sector) ||
                              (child_sector->floor_z >= sector->floor_z - 1.0f);
 
+      // For holes, we MUST clear the parent's area first so the pit interior
+      // is visible. Otherwise the parent's floor (already drawn) occludes it.
+      if (!is_island_render) {
+        render_hole_stencil(dest, child_index, min_x, max_x);
+      }
+
       // Render child sector (Walls) with parent's clipping
       render_sector(dest, child_index, min_x, max_x, depth + 1,
                     is_island_render);
@@ -2264,19 +2240,19 @@ static void ray_render_billboard(GRAPH *dest, RAY_Sprite *s) {
   float dy = s->y - g_engine.camera.y;
 
   // Camera rotation (optimization: precompute cos/sin if possible, but fast
-  // enough here) Note: angles in Bennu are usually handled, here using std math
-  // Assuming standard math where 0 is East? Need to verify engine convention.
-  // Based on raycasting, typically we rotate by -cam_angle
+  // enough here) Note: angles in Bennu are usually handled, here using std
+  // math Assuming standard math where 0 is East? Need to verify engine
+  // convention. Based on raycasting, typically we rotate by -cam_angle
 
   float cam_cos = cosf(g_engine.camera.rot);
   float cam_sin = sinf(g_engine.camera.rot);
 
   // Transform to camera space by projecting onto Camera Axis
   // Forward Vector (Depth) = (cos, sin) -> Dot Product
-  // Right Vector (Lateral) = (-sin, cos) -> Dot Product (Assuming +X = Forward,
-  // +Y = Right relative to cam if Y is down?) Standard rotation formula for
-  // "World to Camera" (inverse rotation): x' = x*cos + y*sin y' = -x*sin +
-  // y*cos
+  // Right Vector (Lateral) = (-sin, cos) -> Dot Product (Assuming +X =
+  // Forward, +Y = Right relative to cam if Y is down?) Standard rotation
+  // formula for "World to Camera" (inverse rotation): x' = x*cos + y*sin y' =
+  // -x*sin + y*cos
 
   float rot_x = dx * cam_cos + dy * cam_sin;  // Depth
   float rot_y = -dx * cam_sin + dy * cam_cos; // Lateral Position
@@ -2298,10 +2274,10 @@ static void ray_render_billboard(GRAPH *dest, RAY_Sprite *s) {
   // If rot_y = 0 (centered), screen_x should be Width/2. Correct.
   // If rot_y = rot_x (45 deg right), screen_x = W/2 + W = 1.5W (Offscreen
   // right). Wait, usually FOV 90 means 45 deg left to 45 deg right. tan(45)
-  // = 1. So at 45 deg, rot_y/rot_x = 1. We want screen_x to be at edge (Width).
-  // Center + (1.0 * Scale) = Width => Scale = Width / 2.
-  // My formula: fov_scale = width. So Center + Width = 1.5 Width. Incorrect for
-  // 90 deg FOV. Should be Width / 2 for 90 deg FOV.
+  // = 1. So at 45 deg, rot_y/rot_x = 1. We want screen_x to be at edge
+  // (Width). Center + (1.0 * Scale) = Width => Scale = Width / 2. My formula:
+  // fov_scale = width. So Center + Width = 1.5 Width. Incorrect for 90 deg
+  // FOV. Should be Width / 2 for 90 deg FOV.
 
   float fov_scale =
       (float)g_engine.displayWidth / 2.0f; // CORRECTED for ~90 deg FOV
@@ -2530,6 +2506,14 @@ void ray_render_frame_build(GRAPH *dest) {
   if (camera_sector_id < 0 || camera_sector_id >= g_engine.num_sectors)
     camera_sector_id = 0;
 
+  // Root finding: Always start rendering from the top-most parent.
+  // This ensures the parent rooms are drawn around nested children.
+  int render_start_sector = camera_sector_id;
+  while (g_engine.sectors[render_start_sector].parent_sector_id != -1) {
+    render_start_sector =
+        g_engine.sectors[render_start_sector].parent_sector_id;
+  }
+
   // Initialize visited tracking array
   if (!sector_visited || sector_visited_capacity < g_engine.num_sectors) {
     if (sector_visited)
@@ -2549,9 +2533,9 @@ void ray_render_frame_build(GRAPH *dest) {
   struct timespec prof_start, prof_end;
   clock_gettime(CLOCK_MONOTONIC, &prof_start);
 
-  // Build Engine standard: Render camera sector and recursively through portals
-  // All visible geometry MUST be connected by portals
-  render_sector(dest, camera_sector_id, 0, xdimen - 1, 0, 0);
+  // Build Engine standard: Render camera sector and recursively through
+  // portals All visible geometry MUST be connected by portals
+  render_sector(dest, render_start_sector, 0, xdimen - 1, 0, 0);
 
   clock_gettime(CLOCK_MONOTONIC, &prof_end);
   double sector_time = (prof_end.tv_sec - prof_start.tv_sec) * 1000.0 +

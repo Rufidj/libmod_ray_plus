@@ -21,6 +21,7 @@ static void ray_detect_shared_walls_with_children(void);
 static void ray_detect_all_shared_walls(void);
 static void ray_reconstruct_hierarchy(void);
 static int ray_point_in_sector_local(RAY_Sector *sector, float px, float py);
+static float ray_sector_area(RAY_Sector *s);
 
 /* ============================================================================
    MAP HEADER v8
@@ -78,7 +79,7 @@ int ray_save_map_v9(const char *filename) {
   /* 1. Header */
   RAY_MapHeader_v9 header;
   memcpy(header.magic, "RAYMAP\x1a", 8);
-  header.version = 9;
+  header.version = 27; /* Updated for liquid_speed support */
   header.num_sectors = g_engine.num_sectors;
   header.num_portals = g_engine.num_portals;
   header.num_sprites = g_engine.num_sprites;
@@ -369,7 +370,20 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     g_engine.num_sectors++;
 
     // Calculate basic AABB
-    // (Simplified logic here, skipped for brevity, should be done in a helper)
+    s->min_x = FLT_MAX;
+    s->min_y = FLT_MAX;
+    s->max_x = -FLT_MAX;
+    s->max_y = -FLT_MAX;
+    for (int v = 0; v < s->num_vertices; v++) {
+      if (s->vertices[v].x < s->min_x)
+        s->min_x = s->vertices[v].x;
+      if (s->vertices[v].x > s->max_x)
+        s->max_x = s->vertices[v].x;
+      if (s->vertices[v].y < s->min_y)
+        s->min_y = s->vertices[v].y;
+      if (s->vertices[v].y > s->max_y)
+        s->max_y = s->vertices[v].y;
+    }
   }
 
   printf("RAY: Loaded %d sectors (expected %d)\n", g_engine.num_sectors,
@@ -438,15 +452,31 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
   printf("RAY: Portal detection complete. Total portals: %d\n",
          g_engine.num_portals);
 
-  /* 8. Detect camera's starting sector */
+  /* 8. Reconstruct hierarchy (Handles nested sectors for maps that don't save
+   * it) */
+  ray_reconstruct_hierarchy();
+
+  /* 9. Detect camera's starting sector */
   g_engine.camera.current_sector_id = -1;
+  float min_area = FLT_MAX;
+
   for (int i = 0; i < g_engine.num_sectors; i++) {
     RAY_Sector *s = &g_engine.sectors[i];
     if (ray_point_in_sector_local(s, g_engine.camera.x, g_engine.camera.y)) {
-      g_engine.camera.current_sector_id = s->sector_id;
-      printf("RAY: Camera starts in sector %d\n", s->sector_id);
-      break;
+      // Pick the smallest sector (highest nesting level)
+      float area = ray_sector_area(s);
+      if (area < min_area) {
+        min_area = area;
+        g_engine.camera.current_sector_id = s->sector_id;
+      }
     }
+  }
+
+  if (g_engine.camera.current_sector_id != -1) {
+    printf("RAY: Camera starts in sector %d (Area=%.1f)\n",
+           g_engine.camera.current_sector_id, min_area);
+  } else {
+    printf("RAY: WARNING: Camera started outside any sector!\n");
   }
   if (g_engine.camera.current_sector_id < 0) {
     printf("RAY: WARNING - Camera not inside any sector! Defaulting to sector "
@@ -555,11 +585,12 @@ int ray_load_map(const char *filename) {
     return ray_load_map_v8(filename); // Will print error/deprecation
   }
 
-  // Support for v25 (Point Lights)
-  if (header.version > 9 && header.version != 23 && header.version != 24 &&
-      header.version != 25) {
+  // Support for v27 (Fluid Speed)
+  if (header.version > 9 && header.version < 22) {
+    printf("RAY: Warning - Map version %u is old.\n", header.version);
+  } else if (header.version > 27) {
     printf("RAY: Warning - Map version %u is newer than expected (max "
-           "supported: 25). "
+           "supported: 27). "
            "Attempts to load might fail.\n",
            header.version);
   }
@@ -927,120 +958,84 @@ static void ray_detect_all_shared_walls(void) {
   printf("RAY: Created %d automatic portals\n", portals_created);
 }
 
-/* Detect nested sectors (sectors completely inside other sectors) and create
- * portals */
-static void ray_detect_nested_sectors(void) {
-  int portals_created = 0;
+/* Detect nested sectors (sectors completely inside other sectors) and rebuild
+ * parent-child links */
+static void ray_reconstruct_hierarchy(void) {
+  printf("RAY: Reconstructing sector hierarchy...\n");
 
-  printf("RAY: Detecting nested sectors (Build Engine style)...\n");
-
-  // For each pair of sectors, check if one is completely inside the other
+  // 1. Reset all hierarchy links
   for (int i = 0; i < g_engine.num_sectors; i++) {
-    RAY_Sector *sector_a = &g_engine.sectors[i];
+    RAY_Sector *s = &g_engine.sectors[i];
+    s->parent_sector_id = -1;
+
+    if (s->child_sector_ids) {
+      free(s->child_sector_ids);
+      s->child_sector_ids = NULL;
+    }
+    s->num_children = 0;
+    s->children_capacity = 0;
+  }
+
+  // 2. For each sector, find the smallest sector that completely contains it
+  for (int i = 0; i < g_engine.num_sectors; i++) {
+    RAY_Sector *child = &g_engine.sectors[i];
+    int best_parent = -1;
+    float min_area = FLT_MAX;
 
     for (int j = 0; j < g_engine.num_sectors; j++) {
       if (i == j)
         continue;
 
-      RAY_Sector *sector_b = &g_engine.sectors[j];
+      RAY_Sector *parent = &g_engine.sectors[j];
 
-      // Check if sector_b's AABB is completely inside sector_a's AABB
-      if (sector_b->min_x >= sector_a->min_x &&
-          sector_b->max_x <= sector_a->max_x &&
-          sector_b->min_y >= sector_a->min_y &&
-          sector_b->max_y <= sector_a->max_y) {
+      // Quick AABB check
+      if (child->min_x < parent->min_x || child->max_x > parent->max_x ||
+          child->min_y < parent->min_y || child->max_y > parent->max_y) {
+        continue;
+      }
 
-        // sector_b is inside sector_a - create invisible portal
-        // Find closest walls between the two sectors
-        float min_dist = FLT_MAX;
-        int best_wall_a = -1;
-        int best_wall_b = -1;
-
-        for (int wa = 0; wa < sector_a->num_walls; wa++) {
-          RAY_Wall *wall_a = &sector_a->walls[wa];
-          if (wall_a->portal_id != -1)
-            continue;
-
-          for (int wb = 0; wb < sector_b->num_walls; wb++) {
-            RAY_Wall *wall_b = &sector_b->walls[wb];
-            if (wall_b->portal_id != -1)
-              continue;
-
-            // Calculate distance between wall centers
-            float ax = (wall_a->x1 + wall_a->x2) * 0.5f;
-            float ay = (wall_a->y1 + wall_a->y2) * 0.5f;
-            float bx = (wall_b->x1 + wall_b->x2) * 0.5f;
-            float by = (wall_b->y1 + wall_b->y2) * 0.5f;
-
-            float dist = sqrtf((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
-            if (dist < min_dist) {
-              min_dist = dist;
-              best_wall_a = wa;
-              best_wall_b = wb;
-            }
-          }
+      // Check if all vertices of child are inside parent
+      int all_inside = 1;
+      for (int v = 0; v < child->num_vertices; v++) {
+        if (!ray_point_in_sector_local(parent, child->vertices[v].x,
+                                       child->vertices[v].y)) {
+          all_inside = 0;
+          break;
         }
+      }
 
-        // Create portal between closest walls
-        if (best_wall_a >= 0 && best_wall_b >= 0) {
-          if (g_engine.num_portals >= g_engine.portals_capacity) {
-            printf("RAY: WARNING - Portal capacity reached\n");
-            return;
-          }
-
-          RAY_Wall *wall_a = &sector_a->walls[best_wall_a];
-          RAY_Wall *wall_b = &sector_b->walls[best_wall_b];
-
-          RAY_Portal *new_portal = &g_engine.portals[g_engine.num_portals];
-          memset(new_portal, 0, sizeof(RAY_Portal));
-
-          new_portal->portal_id = g_engine.num_portals;
-          new_portal->sector_a = sector_a->sector_id;
-          new_portal->sector_b = sector_b->sector_id;
-          new_portal->wall_id_a = best_wall_a;
-          new_portal->wall_id_b = best_wall_b;
-          new_portal->x1 = wall_a->x1;
-          new_portal->y1 = wall_a->y1;
-          new_portal->x2 = wall_a->x2;
-          new_portal->y2 = wall_a->y2;
-
-          wall_a->portal_id = new_portal->portal_id;
-          wall_b->portal_id = new_portal->portal_id;
-
-          // Auto-assign textures
-          if (wall_a->texture_id_upper == 0)
-            wall_a->texture_id_upper = wall_a->texture_id_middle;
-          if (wall_a->texture_id_lower == 0)
-            wall_a->texture_id_lower = wall_a->texture_id_middle;
-          if (wall_b->texture_id_upper == 0)
-            wall_b->texture_id_upper = wall_b->texture_id_middle;
-          if (wall_b->texture_id_lower == 0)
-            wall_b->texture_id_lower = wall_b->texture_id_middle;
-
-          if (sector_a->num_portals < sector_a->portals_capacity) {
-            sector_a->portal_ids[sector_a->num_portals++] =
-                new_portal->portal_id;
-          }
-          if (sector_b->num_portals < sector_b->portals_capacity) {
-            sector_b->portal_ids[sector_b->num_portals++] =
-                new_portal->portal_id;
-          }
-
-          g_engine.num_portals++;
-          portals_created++;
-
-          printf("RAY: Created nested portal %d: Parent Sector %d <-> Nested "
-                 "Sector %d\n",
-                 new_portal->portal_id, sector_a->sector_id,
-                 sector_b->sector_id);
+      if (all_inside) {
+        float area = ray_sector_area(parent);
+        if (area < min_area) {
+          min_area = area;
+          best_parent = j;
         }
       }
     }
+
+    // 3. Set parent-child relationship
+    if (best_parent != -1) {
+      child->parent_sector_id = best_parent;
+      RAY_Sector *p = &g_engine.sectors[best_parent];
+
+      if (p->num_children >= p->children_capacity) {
+        p->children_capacity = (p->num_children == 0) ? 4 : p->num_children * 2;
+        p->child_sector_ids = (int *)realloc(
+            p->child_sector_ids, p->children_capacity * sizeof(int));
+      }
+      p->child_sector_ids[p->num_children++] = i;
+    }
   }
 
-  printf("RAY: Created %d portals for nested sectors\n", portals_created);
+  // Debug summary
+  int nested_count = 0;
+  for (int i = 0; i < g_engine.num_sectors; i++) {
+    if (g_engine.sectors[i].parent_sector_id != -1)
+      nested_count++;
+  }
+  printf("RAY: Hierarchy reconstruction complete. %d nested sectors found.\n",
+         nested_count);
 }
-
 /* Detect walls shared between parent and child sectors and create portals */
 
 /* ============================================================================

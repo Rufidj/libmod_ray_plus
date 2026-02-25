@@ -7,6 +7,7 @@
 #include "libmod_ray_compat.h"
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -590,15 +591,15 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
   if (!engine)
     return 1; /* Blocked by default */
 
-  /* Find sector at new position */
-  RAY_Sector *new_sector = ray_find_sector_at_point(engine, new_x, new_y);
+  /* Find sector at new position - Use Z-aware version! */
+  RAY_Sector *new_sector = ray_find_sector_at_position(engine, new_x, new_y, z);
 
   if (!new_sector) {
     return 1; /* Outside all sectors - blocked */
   }
 
   /* Find sector at current position */
-  RAY_Sector *current_sector = ray_find_sector_at_point(engine, x, y);
+  RAY_Sector *current_sector = ray_find_sector_at_position(engine, x, y, z);
 
   if (!current_sector) {
     return 0; /* Currently outside - allow movement into sector */

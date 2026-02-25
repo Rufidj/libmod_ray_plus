@@ -840,8 +840,24 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
   GPU_SetClip(target, (Sint16)clip.x1, (Sint16)clip.y1,
               (Uint16)(clip.x2 - clip.x1), (Uint16)(clip.y2 - clip.y1));
 
-  float floor_h = sector->floor_z - s_cam_z;
-  float ceil_h = sector->ceiling_z - s_cam_z;
+  /* Heights */
+  float fz = sector->floor_z;
+  float cz = sector->ceiling_z;
+
+  /* For holes (non-island children), extend walls to parent heights to fill
+   * "rim" gaps */
+  if (!is_island && sector->parent_sector_id != -1) {
+    RAY_Sector *parent = find_sector_by_id(sector->parent_sector_id);
+    if (parent) {
+      if (parent->floor_z > cz)
+        cz = parent->floor_z;
+      if (parent->ceiling_z < fz)
+        fz = parent->ceiling_z;
+    }
+  }
+
+  float floor_h = fz - s_cam_z;
+  float ceil_h = cz - s_cam_z;
 
   /* ---- PRE-XFORM WALLS FOR PRECISION CLIPPING ---- */
   XFormWall *xf_walls =
@@ -880,10 +896,17 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
       if (!child)
         continue;
 
-      /* If child ceiling is at our floor height, it punches a hole in the
-       * floor (PIT) */
-      if (fabsf(child->ceiling_z - sector->floor_z) < 0.1f ||
-          child->ceiling_z < sector->floor_z) {
+      /* If child ceiling is at our floor height, it punches a hole in the floor
+         (PIT). Check against the child's REAL rim height (which might have been
+         extended). */
+      float child_rim_z = child->ceiling_z;
+      if (child->parent_sector_id != -1) {
+        if (sector->floor_z > child_rim_z)
+          child_rim_z = sector->floor_z;
+      }
+
+      if (fabsf(child_rim_z - sector->floor_z) < 0.1f ||
+          child_rim_z < sector->floor_z) {
         for (int w = 0; w < child->num_walls; w++) {
           RAY_Wall *cw = &child->walls[w];
           float x0 = cw->x1 - s_cam_x, y0 = cw->y1 - s_cam_y;
@@ -1369,13 +1392,14 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     }
 
     /* ---- SOLID WALL (Segmented Triple-Texture Support) ---- */
-    /* Bounds and splits */
+    /* Use ORIGINAL sector heights for wall textures (fluid zone only).
+       Extended heights (fz/cz) are used ONLY for rim extensions below. */
     float z_floor = sector->floor_z;
     float z_ceil = sector->ceiling_z;
     float split_low = wall->texture_split_z_lower;
     float split_up = wall->texture_split_z_upper;
 
-    // Clamp splits to absolute sector range
+    // Clamp splits to ORIGINAL sector range (not extended)
     if (split_low < z_floor)
       split_low = z_floor;
     if (split_low > z_ceil)
@@ -1476,7 +1500,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     }
 
     /* Segment rendering macro */
-#define RENDER_SOLID_SEGMENT(tex_id, normal_id, z_bot_abs, z_top_abs)          \
+#define RENDER_SOLID_SEGMENT(tex_id, normal_id, z_bot_abs, z_top_abs,          \
+                             force_no_fluid)                                   \
   do {                                                                         \
     if ((tex_id) > 0 && (z_top_abs) > (z_bot_abs)) {                           \
       GPU_Image *_tex = get_gpu_texture(0, tex_id);                            \
@@ -1484,7 +1509,7 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
         GPU_SetImageFilter(_tex, GPU_FILTER_LINEAR);                           \
         GPU_SetWrapMode(_tex, GPU_WRAP_REPEAT, GPU_WRAP_REPEAT);               \
         GPU_Image *_norm = get_gpu_texture(0, normal_id);                      \
-        int is_fluid = (sector->flags & 128) != 0;                             \
+        int is_fluid = (force_no_fluid) ? 0 : ((sector->flags & 128) != 0);    \
         if ((transparent_pass && is_fluid) ||                                  \
             (!transparent_pass && !is_fluid)) {                                \
           if (transparent_pass) {                                              \
@@ -1495,6 +1520,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
               (sector->flags & (24 | 256)); /* Scroll & Ripples */             \
           if (is_fluid)                                                        \
             activeFlags |= (sector->flags & 7);                                \
+          else if (force_no_fluid)                                             \
+            activeFlags = 0; /* No effects on rim */                           \
           activate_normal_shader(_norm, wall_tx_m, wall_ty_m, 0.0f, 0.0f,      \
                                  0.0f, 1.0f, wall_nx_m, wall_ny_m, 0.0f,       \
                                  activeFlags, sector->liquid_intensity,        \
@@ -1535,15 +1562,50 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     }                                                                          \
   } while (0)
 
-    // 1. Lower Segment (Floor to SplitLow)
+    /* Determine original (non-extended) sector heights for fluid boundary */
+    float orig_floor = sector->floor_z;
+    float orig_ceil = sector->ceiling_z;
+
+    // 1. Lower Segment (Floor to SplitLow) — submerged, with fluid
     RENDER_SOLID_SEGMENT(wall->texture_id_lower, wall->texture_id_lower_normal,
-                         z_floor, split_low);
-    // 2. Middle Segment (SplitLow to SplitUp, or adjusted boundaries)
+                         z_floor, split_low, 0);
+    // 2. Middle Segment (SplitLow to SplitUp) — submerged, with fluid
     RENDER_SOLID_SEGMENT(wall->texture_id_middle,
-                         wall->texture_id_middle_normal, mid_z_bot, mid_z_top);
-    // 3. Upper Segment (SplitUp to Ceiling)
+                         wall->texture_id_middle_normal, mid_z_bot, mid_z_top,
+                         0);
+    // 3. Upper Segment (SplitUp to original Ceiling) — submerged, with fluid
     RENDER_SOLID_SEGMENT(wall->texture_id_upper, wall->texture_id_upper_normal,
-                         split_up, z_ceil);
+                         split_up, orig_ceil, 0);
+
+    /* ---- RIM EXTENSIONS (above/below liquid) — NO fluid distortion ---- */
+    /* Upper rim: from original ceiling up to extended ceiling (parent floor) */
+    if (cz > orig_ceil + 0.1f) {
+      int rim_tex = wall->texture_id_middle;
+      int rim_norm = wall->texture_id_middle_normal;
+      if (rim_tex <= 0) {
+        rim_tex = wall->texture_id_upper;
+        rim_norm = wall->texture_id_upper_normal;
+      }
+      if (rim_tex <= 0) {
+        rim_tex = wall->texture_id_lower;
+        rim_norm = wall->texture_id_lower_normal;
+      }
+      RENDER_SOLID_SEGMENT(rim_tex, rim_norm, orig_ceil, cz, 1);
+    }
+    /* Lower rim: from extended floor up to original floor (parent ceiling) */
+    if (fz < orig_floor - 0.1f) {
+      int rim_tex = wall->texture_id_middle;
+      int rim_norm = wall->texture_id_middle_normal;
+      if (rim_tex <= 0) {
+        rim_tex = wall->texture_id_lower;
+        rim_norm = wall->texture_id_lower_normal;
+      }
+      if (rim_tex <= 0) {
+        rim_tex = wall->texture_id_upper;
+        rim_norm = wall->texture_id_upper_normal;
+      }
+      RENDER_SOLID_SEGMENT(rim_tex, rim_norm, fz, orig_floor, 1);
+    }
 
 #undef RENDER_SOLID_SEGMENT
   } /* end wall loop */
@@ -1605,15 +1667,21 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
       if (!c_sect)
         continue;
 
-      /* Render child sector correctly: only identify as island if it has NO
-       * portals */
-      int child_is_island = 1;
-      for (int iw = 0; iw < c_sect->num_walls; iw++) {
-        if (c_sect->walls[iw].portal_id != -1) {
-          child_is_island = 0;
-          break;
-        }
+      /* Classify child: HOLE (pit/pool) vs ISLAND (box/column)
+         - HOLE: child ceiling <= parent floor (pit downward)
+                 or child floor >= parent ceiling (elevation upward)
+         - ISLAND: child is a solid box floating inside parent */
+      int child_is_island = 1; /* default: island */
+
+      /* If child's ceiling is at or below parent's floor → it's a PIT (hole) */
+      if (c_sect->ceiling_z <= sector->floor_z + 0.1f) {
+        child_is_island = 0;
       }
+      /* If child's floor is at or above parent's ceiling → elevation (hole) */
+      if (c_sect->floor_z >= sector->ceiling_z - 0.1f) {
+        child_is_island = 0;
+      }
+
       render_sector_gpu(target, child_id, clip, depth + 1, child_is_island,
                         sector->floor_z, sector->ceiling_z, transparent_pass);
       GPU_SetClip(target, (Sint16)clip.x1, (Sint16)clip.y1,
@@ -2308,10 +2376,17 @@ void ray_render_scene_gpu(GPU_Target *target, int current_sector) {
 
   ClipRect full_clip = {0, 0, (float)s_screen_w, (float)s_screen_h};
 
+  /* Find root parent for correct nested context */
+  int render_root = current_sector;
+  while (render_root >= 0 && render_root < g_engine.num_sectors &&
+         g_engine.sectors[render_root].parent_sector_id != -1) {
+    render_root = g_engine.sectors[render_root].parent_sector_id;
+  }
+
   /* Pass 0: Opaque geometry */
   visited_clear();
-  render_sector_gpu(target, current_sector, full_clip, 0, 0, -99999.0f,
-                    99999.0f, 0);
+  render_sector_gpu(target, render_root, full_clip, 0, 0, -99999.0f, 99999.0f,
+                    0);
 
   /* Flush walls to depth buffer before sprites */
   GPU_FlushBlitBuffer();
