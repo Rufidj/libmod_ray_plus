@@ -44,6 +44,12 @@ static void render_sprite_gpu(GPU_Target *target, RAY_Sprite *sprite);
 #define NEAR_PLANE 0.1f
 #define FAR_PLANE 10000.0f
 
+/* Global fog (determined per-frame from camera sector) */
+static float s_fog_r = 0.5f, s_fog_g = 0.5f, s_fog_b = 0.5f;
+static float s_fog_density = 0.0f;
+static float s_fog_start = 100.0f;
+static float s_fog_end = 1000.0f;
+
 /* (Moved lower down to be after camera variables) */
 
 /* ============================================================================
@@ -184,6 +190,10 @@ static int s_u_time = -1;
 static int s_u_sectorFlags = -1;
 static int s_u_liquidIntensity = -1;
 static int s_u_liquidSpeed = -1;
+static int s_u_fogColor = -1;
+static int s_u_fogDensity = -1;
+static int s_u_fogStart = -1;
+static int s_u_fogEnd = -1;
 
 static const char *vertex_shader_source =
     "#version 120\n"
@@ -223,6 +233,10 @@ static const char *fragment_shader_source =
     "uniform int u_sectorFlags;\n"
     "uniform float u_liquidIntensity;\n"
     "uniform float u_liquidSpeed;\n"
+    "uniform vec3 u_fogColor;\n"
+    "uniform float u_fogDensity;\n"
+    "uniform float u_fogStart;\n"
+    "uniform float u_fogEnd;\n"
     "void main() {\n"
     "    vec2 finalUV = uv;\n"
     "    float fFlags = float(u_sectorFlags) + 0.1;\n"
@@ -261,8 +275,47 @@ static const char *fragment_shader_source =
     "    if (u_time < 0.001) texColor.rgb *= 0.1; // Visual Debug: if time "
     "stalls, darken\n"
     "    if (texColor.a < 0.01) discard;\n"
+    "\n"
+    "    // Volumetric Fog - Silent Hill style\n"
+    "    vec3 finalRGB = texColor.rgb;\n"
+    "    if (u_fogDensity > 0.001) {\n"
+    "        // Reconstruct world distance from depth Z\n"
+    "        float t = (100.0 - fragPos.z) / 200.0;\n"
+    "        float worldDist = exp(mix(log(0.1), log(10000.0), clamp(t, 0.0, "
+    "1.0)));\n"
+    "        \n"
+    "        // Exponential squared fog (like real atmospheric scattering)\n"
+    "        float fogAmount = u_fogDensity / 100.0;\n"
+    "        float expFog = 1.0 - exp(-pow(worldDist * fogAmount * 0.003, "
+    "2.0));\n"
+    "        \n"
+    "        // Procedural noise for volumetric swirling effect\n"
+    "        float wx = (fragPos.x - u_halfW) * worldDist / u_focal;\n"
+    "        float wy = worldDist;\n"
+    "        float noiseScale = 0.008;\n"
+    "        float t1 = u_time * 0.15;\n"
+    "        float n1 = sin(wx * noiseScale + t1) * cos(wy * noiseScale * 0.7 "
+    "+ t1 * 0.8);\n"
+    "        float n2 = sin(wx * noiseScale * 2.3 + t1 * 1.3 + 1.7) * cos(wy * "
+    "noiseScale * 1.9 - t1 * 0.6);\n"
+    "        float n3 = sin(wx * noiseScale * 4.7 - t1 * 0.9 + 3.1) * cos(wy * "
+    "noiseScale * 3.8 + t1 * 1.1);\n"
+    "        float noise = (n1 + n2 * 0.5 + n3 * 0.25) / 1.75;\n"
+    "        \n"
+    "        // Modulate fog with noise for volumetric patches\n"
+    "        float volumetric = expFog * (1.0 + noise * 0.4 * expFog);\n"
+    "        volumetric = clamp(volumetric, 0.0, 1.0);\n"
+    "        \n"
+    "        // Distance-based fade in (no fog before fogStart)\n"
+    "        float startFade = clamp((worldDist - u_fogStart) / max(u_fogStart "
+    "* 0.5, 10.0), 0.0, 1.0);\n"
+    "        volumetric *= startFade;\n"
+    "        \n"
+    "        finalRGB = mix(finalRGB, u_fogColor, volumetric);\n"
+    "    }\n"
+    "\n"
     "    if (u_numLights <= 0) {\n"
-    "        gl_FragColor = texColor;\n"
+    "        gl_FragColor = vec4(finalRGB, texColor.a);\n"
     "        return;\n"
     "    }\n"
     "    float t_z = (100.0 - fragPos.z) / 200.0;\n"
@@ -288,7 +341,8 @@ static const char *fragment_shader_source =
     "        finalLight += u_lightColor[i] * (0.5 + 0.5 * diff) * attenuation "
     "* 2.0;\n"
     "    }\n"
-    "    gl_FragColor = vec4(texColor.rgb * finalLight, texColor.a);\n"
+    "    vec3 litColor = finalRGB * finalLight;\n"
+    "    gl_FragColor = vec4(litColor, texColor.a);\n"
     "}\n";
 
 static void init_normal_shader(void) {
@@ -327,13 +381,19 @@ static void init_normal_shader(void) {
   s_u_liquidIntensity =
       GPU_GetUniformLocation(s_normal_shader, "u_liquidIntensity");
   s_u_liquidSpeed = GPU_GetUniformLocation(s_normal_shader, "u_liquidSpeed");
+  s_u_fogColor = GPU_GetUniformLocation(s_normal_shader, "u_fogColor");
+  s_u_fogDensity = GPU_GetUniformLocation(s_normal_shader, "u_fogDensity");
+  s_u_fogStart = GPU_GetUniformLocation(s_normal_shader, "u_fogStart");
+  s_u_fogEnd = GPU_GetUniformLocation(s_normal_shader, "u_fogEnd");
 }
 
 static void activate_normal_shader(GPU_Image *normalMap, float tx, float ty,
                                    float tz, float bx, float by, float bz,
                                    float nx, float ny, float nz,
                                    int sectorFlags, float liquidIntensity,
-                                   float liquidSpeed) {
+                                   float liquidSpeed, float fogR, float fogG,
+                                   float fogB, float fogDensity, float fogStart,
+                                   float fogEnd) {
   init_normal_shader();
   if (s_normal_shader == 0)
     return;
@@ -386,6 +446,11 @@ static void activate_normal_shader(GPU_Image *normalMap, float tx, float ty,
   GPU_SetUniformi(s_u_sectorFlags, sectorFlags);
   GPU_SetUniformf(s_u_liquidIntensity, liquidIntensity);
   GPU_SetUniformf(s_u_liquidSpeed, liquidSpeed);
+  float fogCol[3] = {fogR, fogG, fogB};
+  GPU_SetUniformfv(s_u_fogColor, 3, 1, fogCol);
+  GPU_SetUniformf(s_u_fogDensity, fogDensity);
+  GPU_SetUniformf(s_u_fogStart, fogStart);
+  GPU_SetUniformf(s_u_fogEnd, fogEnd);
 
   /* Transform TBN Matrix to View Space */
   /* World vectors (nx, ny, tx, ty, bx, by) -> View space (X=Right, Z=Forward)
@@ -480,7 +545,8 @@ static void render_sector_plane(GPU_Target *target, RAY_Sector *sector,
 
   activate_normal_shader(normal_tex, 1.0f, 0.0f, 0.0f, bx_p, by_p, bz_p, nx_p,
                          ny_p, nz_p, activeFlags, sector->liquid_intensity,
-                         sector->liquid_speed);
+                         sector->liquid_speed, s_fog_r, s_fog_g, s_fog_b,
+                         s_fog_density, s_fog_start, s_fog_end);
 
   if (depth > 0) {
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -679,7 +745,8 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
 
   activate_normal_shader(normal_tex, 1.0f, 0.0f, 0.0f, bx, by, bz, nx, ny, nz,
                          activeFlags, sector->liquid_intensity,
-                         sector->liquid_speed);
+                         sector->liquid_speed, s_fog_r, s_fog_g, s_fog_b,
+                         s_fog_density, s_fog_start, s_fog_end);
 
   /* Calculate bounding box of the sector for fixed texture mapping (0..1) */
   float min_x = sector->walls[0].x1, max_x = sector->walls[0].x1;
@@ -1303,7 +1370,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
                 activate_normal_shader(
                     upper_normal_tex, wall_tx_u, wall_ty_u, 0.0f, 0.0f, 0.0f,
                     1.0f, wall_nx_u, wall_ny_u, 0.0f, wallActiveFlags,
-                    sector->liquid_intensity, sector->liquid_speed);
+                    sector->liquid_intensity, sector->liquid_speed, s_fog_r,
+                    s_fog_g, s_fog_b, s_fog_density, s_fog_start, s_fog_end);
 
                 GPU_TriangleBatch(upper_tex, target, nvu, vu, niu, iu,
                                   GPU_BATCH_XYZ_ST);
@@ -1391,7 +1459,8 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
                 activate_normal_shader(
                     lower_normal_tex, wall_tx_l, wall_ty_l, 0.0f, 0.0f, 0.0f,
                     1.0f, wall_nx_l, wall_ny_l, 0.0f, wallActiveFlags,
-                    sector->liquid_intensity, sector->liquid_speed);
+                    sector->liquid_intensity, sector->liquid_speed, s_fog_r,
+                    s_fog_g, s_fog_b, s_fog_density, s_fog_start, s_fog_end);
 
                 GPU_TriangleBatch(lower_tex, target, nvl, vl, nil, il,
                                   GPU_BATCH_XYZ_ST);
@@ -1536,10 +1605,11 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
             activeFlags |= (sector->flags & 7);                                \
           else if (force_no_fluid)                                             \
             activeFlags = 0; /* No effects on rim */                           \
-          activate_normal_shader(_norm, wall_tx_m, wall_ty_m, 0.0f, 0.0f,      \
-                                 0.0f, 1.0f, wall_nx_m, wall_ny_m, 0.0f,       \
-                                 activeFlags, sector->liquid_intensity,        \
-                                 sector->liquid_speed);                        \
+          activate_normal_shader(                                              \
+              _norm, wall_tx_m, wall_ty_m, 0.0f, 0.0f, 0.0f, 1.0f, wall_nx_m,  \
+              wall_ny_m, 0.0f, activeFlags, sector->liquid_intensity,          \
+              sector->liquid_speed, s_fog_r, s_fog_g, s_fog_b, s_fog_density,  \
+              s_fog_start, s_fog_end);                                         \
           int _nvCount = 0;                                                    \
           float _h_bot = (z_bot_abs) - s_cam_z;                                \
           float _h_top = (z_top_abs) - s_cam_z;                                \
@@ -2345,6 +2415,15 @@ void ray_render_frame_gpu(void *dest_graph_ptr) {
   s_cos_ang = cosf(ang);
   s_sin_ang = sinf(ang);
   s_horizon = s_half_h + (int)g_engine.camera.pitch;
+
+  /* Set global fog from camera's current sector */
+  RAY_Sector *cam_sector = &g_engine.sectors[current_sector];
+  s_fog_r = cam_sector->fog_color_r;
+  s_fog_g = cam_sector->fog_color_g;
+  s_fog_b = cam_sector->fog_color_b;
+  s_fog_density = cam_sector->fog_density;
+  s_fog_start = cam_sector->fog_start;
+  s_fog_end = cam_sector->fog_end;
 
   /* DIAGNOSTIC: Check if we have a real depth buffer */
   static int depth_checked = 0;

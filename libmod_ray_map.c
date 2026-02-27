@@ -79,7 +79,7 @@ int ray_save_map_v9(const char *filename) {
   /* 1. Header */
   RAY_MapHeader_v9 header;
   memcpy(header.magic, "RAYMAP\x1a", 8);
-  header.version = 27; /* Updated for liquid_speed support */
+  header.version = 28; /* Updated for fog support */
   header.num_sectors = g_engine.num_sectors;
   header.num_portals = g_engine.num_portals;
   header.num_sprites = g_engine.num_sprites;
@@ -103,6 +103,14 @@ int ray_save_map_v9(const char *filename) {
     fwrite(&s->floor_texture_id, sizeof(int), 1, file);
     fwrite(&s->ceiling_texture_id, sizeof(int), 1, file);
     fwrite(&s->light_level, sizeof(int), 1, file);
+
+    /* v28+: Fog settings */
+    fwrite(&s->fog_color_r, sizeof(float), 1, file);
+    fwrite(&s->fog_color_g, sizeof(float), 1, file);
+    fwrite(&s->fog_color_b, sizeof(float), 1, file);
+    fwrite(&s->fog_density, sizeof(float), 1, file);
+    fwrite(&s->fog_start, sizeof(float), 1, file);
+    fwrite(&s->fog_end, sizeof(float), 1, file);
 
     /* Vertices */
     fwrite(&s->num_vertices, sizeof(int), 1, file);
@@ -188,8 +196,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     return 0;
 
   int map_version = header->version;
-  if (map_version < 9 || map_version > 27) {
-    printf("RAY: ERROR - Map version %d not supported by this engine (9-27 "
+  if (map_version < 9 || map_version > 28) {
+    printf("RAY: ERROR - Map version %d not supported by this engine (9-28 "
            "only)\n",
            map_version);
     return 0;
@@ -281,8 +289,25 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
       s->liquid_speed = 1.0f;
     }
 
-    printf("RAY: Loading sector %d: floor_z=%.1f, ceiling_z=%.1f\n",
-           s->sector_id, s->floor_z, s->ceiling_z);
+    /* v28+: Fog settings */
+    if (map_version >= 28) {
+      (void)fread(&s->fog_color_r, sizeof(float), 1, file);
+      (void)fread(&s->fog_color_g, sizeof(float), 1, file);
+      (void)fread(&s->fog_color_b, sizeof(float), 1, file);
+      (void)fread(&s->fog_density, sizeof(float), 1, file);
+      (void)fread(&s->fog_start, sizeof(float), 1, file);
+      (void)fread(&s->fog_end, sizeof(float), 1, file);
+    } else {
+      s->fog_color_r = 0.5f;
+      s->fog_color_g = 0.5f;
+      s->fog_color_b = 0.5f;
+      s->fog_density = 0.0f;
+      s->fog_start = 100.0f;
+      s->fog_end = 1000.0f;
+    }
+
+    printf("RAY: Loading sector %d: floor_z=%.1f, ceiling_z=%.1f, fog=%.1f\n",
+           s->sector_id, s->floor_z, s->ceiling_z, s->fog_density);
 
     /* Vertices */
     (void)fread(&s->num_vertices, sizeof(int), 1, file);
@@ -462,7 +487,16 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
    * it) */
   ray_reconstruct_hierarchy();
 
-  /* 9. Detect camera's starting sector */
+  /* 9. Override camera with first spawn flag (car position) if available */
+  if (g_engine.num_spawn_flags > 0) {
+    g_engine.camera.x = g_engine.spawn_flags[0].x;
+    g_engine.camera.y = g_engine.spawn_flags[0].y;
+    g_engine.camera.z = g_engine.spawn_flags[0].z + 32.0f;
+    printf("RAY: Camera overridden to spawn flag 0: (%.1f, %.1f, %.1f)\n",
+           g_engine.camera.x, g_engine.camera.y, g_engine.camera.z);
+  }
+
+  /* 10. Detect camera's starting sector */
   g_engine.camera.current_sector_id = -1;
   float min_area = FLT_MAX;
 
@@ -594,9 +628,9 @@ int ray_load_map(const char *filename) {
   // Support for v27 (Fluid Speed)
   if (header.version > 9 && header.version < 22) {
     printf("RAY: Warning - Map version %u is old.\n", header.version);
-  } else if (header.version > 27) {
+  } else if (header.version > 28) {
     printf("RAY: Warning - Map version %u is newer than expected (max "
-           "supported: 27). "
+           "supported: 28). "
            "Attempts to load might fail.\n",
            header.version);
   }

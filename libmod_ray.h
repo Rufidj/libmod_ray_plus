@@ -156,6 +156,12 @@ typedef struct {
   int flags;              /* Sector flags (Liquid types, etc.) */
   float liquid_intensity; /* Intensity of the distortion effect (0.0 to 1.0+) */
   float liquid_speed;     /* Speed of the distortion/ripples (0.0 to 10.0+) */
+
+  /* v28+: Volumetric Fog per sector */
+  float fog_color_r, fog_color_g, fog_color_b; /* Fog color (0.0 - 1.0) */
+  float fog_density;                           /* 0 = no fog, 100 = full */
+  float fog_start;                             /* Distance where fog begins */
+  float fog_end; /* Distance where fog is fully opaque */
 } RAY_Sector;
 
 /* ============================================================================
