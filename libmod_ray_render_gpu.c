@@ -39,8 +39,8 @@ static void render_sprite_gpu(GPU_Target *target, RAY_Sprite *sprite);
    ============================================================================
  */
 
-#define MAX_PORTAL_DEPTH 16
-#define MAX_SECTOR_VERTS 64
+#define MAX_PORTAL_DEPTH 128
+#define MAX_SECTOR_VERTS 256
 #define NEAR_PLANE 0.1f
 #define FAR_PLANE 10000.0f
 
@@ -149,6 +149,16 @@ static float s_cos_ang, s_sin_ang;
 static float s_focal;
 static int s_half_w, s_half_h, s_screen_w, s_screen_h;
 static int s_horizon;
+
+/* ============================================================================
+   ISLAND SECTOR CACHE (pre-built each frame for sprite occlusion)
+   ============================================================================
+ */
+#define MAX_ISLAND_SECTORS 256
+static RAY_Sector *s_island_sectors[MAX_ISLAND_SECTORS];
+static float s_island_floor[MAX_ISLAND_SECTORS];
+static float s_island_ceil[MAX_ISLAND_SECTORS];
+static int s_num_islands = 0;
 
 /* ============================================================================
    NORMAL MAPPING SHADER
@@ -483,7 +493,7 @@ static void render_sector_plane(GPU_Target *target, RAY_Sector *sector,
   unsigned short i_local[SCAN_LIMIT * 6];
   int v_idx = 0, i_idx = 0;
 
-  float intercepts[MAX_SECTOR_VERTS * 2];
+  float intercepts[MAX_SECTOR_VERTS * 4];
   float horizon_f = (float)s_horizon;
 
   for (int y = (int)clip.y1; y <= (int)clip.y2; y++) {
@@ -499,6 +509,8 @@ static void render_sector_plane(GPU_Target *target, RAY_Sector *sector,
     int hits = 0;
     if (hits < MAX_SECTOR_VERTS * 4 - 2) {
       if (xf && num_xf > 0 && is_island) {
+        /* ISLANDS ONLY: Use wall intersections to clip floor/ceiling
+           to the sector polygon shape. */
         for (int i = 0; i < num_xf; i++) {
           float z0 = xf[i].tz0, z1 = xf[i].tz1;
           if ((z0 <= rz && z1 >= rz) || (z1 <= rz && z0 >= rz)) {
@@ -514,7 +526,8 @@ static void render_sector_plane(GPU_Target *target, RAY_Sector *sector,
           }
         }
       } else {
-        /* Environmental filler: Start with full clip and subtract cutouts */
+        /* Regular sectors: fill full clip width, subtract cutouts.
+           The walls render on top and visually bound the floor. */
         intercepts[hits++] = clip.x1;
         intercepts[hits++] = clip.x2;
 
@@ -640,7 +653,7 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
                               float plane_z, GPU_Image *tex,
                               GPU_Image *normal_tex, XFormWall *xf,
                               int num_walls, ClipRect clip) {
-  if (!tex || num_walls < 3 || num_walls > 64)
+  if (!tex || num_walls < 3 || num_walls > MAX_SECTOR_VERTS)
     return;
 
   float h = plane_z - s_cam_z;
@@ -689,8 +702,9 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
     dy = 1.0f;
 
   /* Project each wall start-vertex at the given plane height */
-  float sx[64], sy[64], sz_arr[64], wu[64], wv[64];
-  int valid[64];
+  float sx[MAX_SECTOR_VERTS], sy[MAX_SECTOR_VERTS], sz_arr[MAX_SECTOR_VERTS],
+      wu[MAX_SECTOR_VERTS], wv[MAX_SECTOR_VERTS];
+  int valid[MAX_SECTOR_VERTS];
   int num_valid = 0;
 
   for (int i = 0; i < num_walls; i++) {
@@ -721,7 +735,7 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
   /* Tessellate each fan triangle (subdivide 4x4=16) to reduce parallax/affine
      warping. By using many small triangles, the linear interpolation error of
      the GPU is minimized, resulting in a stable, non-deformed texture. */
-  float t_vb[64 * 16 * 3 * 5];
+  float t_vb[MAX_SECTOR_VERTS * 16 * 3 * 5];
   int t_nv = 0;
 
   for (int i = 1; i < num_walls - 1; i++) {
@@ -1607,6 +1621,41 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
       RENDER_SOLID_SEGMENT(rim_tex, rim_norm, fz, orig_floor, 1);
     }
 
+    /* ---- POOL/PIT RIM: fill gap between sector and parent heights ----
+       When is_island=1, fz/cz are NOT extended to parent heights, so the
+       existing rim checks above are always false. Use parent_floor_z and
+       parent_ceil_z (function parameters) to fill the visual gap. */
+    if (depth > 0 && is_island) {
+      /* Pool edge: sector ceiling below parent floor */
+      if (parent_floor_z > orig_ceil + 0.1f) {
+        int pit_tex = wall->texture_id_middle;
+        int pit_norm = wall->texture_id_middle_normal;
+        if (pit_tex <= 0) {
+          pit_tex = wall->texture_id_upper;
+          pit_norm = wall->texture_id_upper_normal;
+        }
+        if (pit_tex <= 0) {
+          pit_tex = wall->texture_id_lower;
+          pit_norm = wall->texture_id_lower_normal;
+        }
+        RENDER_SOLID_SEGMENT(pit_tex, pit_norm, orig_ceil, parent_floor_z, 1);
+      }
+      /* Elevation edge: sector floor above parent ceiling */
+      if (parent_ceil_z < orig_floor - 0.1f) {
+        int elev_tex = wall->texture_id_middle;
+        int elev_norm = wall->texture_id_middle_normal;
+        if (elev_tex <= 0) {
+          elev_tex = wall->texture_id_lower;
+          elev_norm = wall->texture_id_lower_normal;
+        }
+        if (elev_tex <= 0) {
+          elev_tex = wall->texture_id_upper;
+          elev_norm = wall->texture_id_upper_normal;
+        }
+        RENDER_SOLID_SEGMENT(elev_tex, elev_norm, parent_ceil_z, orig_floor, 1);
+      }
+    }
+
 #undef RENDER_SOLID_SEGMENT
   } /* end wall loop */
 
@@ -1667,20 +1716,11 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
       if (!c_sect)
         continue;
 
-      /* Classify child: HOLE (pit/pool) vs ISLAND (box/column)
-         - HOLE: child ceiling <= parent floor (pit downward)
-                 or child floor >= parent ceiling (elevation upward)
-         - ISLAND: child is a solid box floating inside parent */
-      int child_is_island = 1; /* default: island */
-
-      /* If child's ceiling is at or below parent's floor → it's a PIT (hole) */
-      if (c_sect->ceiling_z <= sector->floor_z + 0.1f) {
-        child_is_island = 0;
-      }
-      /* If child's floor is at or above parent's ceiling → elevation (hole) */
-      if (c_sect->floor_z >= sector->ceiling_z - 0.1f) {
-        child_is_island = 0;
-      }
+      /* All child sectors use wall-intersection clipping (island=1).
+         This limits floor/ceiling to the sector's polygon for both
+         islands (solid boxes) and pits/pools (depressions).
+         Full-clip mode caused pools to fill the entire screen. */
+      int child_is_island = 1;
 
       render_sector_gpu(target, child_id, clip, depth + 1, child_is_island,
                         sector->floor_z, sector->ceiling_z, transparent_pass);
@@ -2148,8 +2188,57 @@ static void ray_render_gltf_gpu(GPU_Target *target, RAY_Sprite *sprite) {
   }
 }
 
+/* ============================================================================
+   SOFTWARE SPRITE OCCLUSION: Check if a sprite is hidden behind island walls.
+   Casts a 2D ray from camera to sprite and tests against all island sector
+   walls. Returns 1 if occluded, 0 if visible.
+   ============================================================================
+ */
+static int sprite_occluded_by_islands(float sprite_x, float sprite_y,
+                                      float sprite_z) {
+  float ray_dx = sprite_x - s_cam_x;
+  float ray_dy = sprite_y - s_cam_y;
+  float sprite_dist_sq = ray_dx * ray_dx + ray_dy * ray_dy;
+  if (sprite_dist_sq < 1.0f)
+    return 0; /* Too close to camera */
+
+  /* Quick check against pre-cached island sectors */
+  for (int i = 0; i < s_num_islands; i++) {
+    /* Check if the sprite's Z is within the island's vertical range */
+    if (sprite_z > s_island_ceil[i] || sprite_z < s_island_floor[i])
+      continue;
+
+    /* Test ray against each wall of this island sector */
+    RAY_Sector *sector = s_island_sectors[i];
+    for (int w = 0; w < sector->num_walls; w++) {
+      RAY_Wall *wall = &sector->walls[w];
+      float wx = wall->x2 - wall->x1;
+      float wy = wall->y2 - wall->y1;
+
+      float det = ray_dx * wy - ray_dy * wx;
+      if (fabsf(det) < 0.001f)
+        continue;
+
+      float dx = wall->x1 - s_cam_x;
+      float dy = wall->y1 - s_cam_y;
+
+      float t = (dx * wy - dy * wx) / det;
+      float u = (dx * ray_dy - dy * ray_dx) / det;
+
+      if (t > 0.01f && t < 0.99f && u >= 0.0f && u <= 1.0f) {
+        return 1; /* Occluded */
+      }
+    }
+  }
+  return 0;
+}
+
 static void render_sprite_gpu(GPU_Target *target, RAY_Sprite *sprite) {
   if (sprite->hidden || sprite->cleanup)
+    return;
+
+  /* Software occlusion: skip sprites hidden behind island walls */
+  if (sprite_occluded_by_islands(sprite->x, sprite->y, sprite->z))
     return;
 
   if (sprite->model) {
@@ -2383,6 +2472,31 @@ void ray_render_scene_gpu(GPU_Target *target, int current_sector) {
     render_root = g_engine.sectors[render_root].parent_sector_id;
   }
 
+  /* Pre-build island cache for sprite occlusion (once per frame).
+     A sector is a solid island occluder only if it is a box completely
+     INSIDE its parent: floor above parent floor AND ceiling below parent
+     ceiling. Elevated-floor sectors (ramps, steps) where ceiling==parent
+     ceiling are NOT solid occluders. */
+  s_num_islands = 0;
+  for (int si = 0;
+       si < g_engine.num_sectors && s_num_islands < MAX_ISLAND_SECTORS; si++) {
+    RAY_Sector *sec = &g_engine.sectors[si];
+    if (sec->parent_sector_id == -1)
+      continue;
+    RAY_Sector *par = find_sector_by_id(sec->parent_sector_id);
+    if (!par)
+      continue;
+    /* Must be strictly inside the parent vertically on BOTH ends */
+    if (sec->floor_z <= par->floor_z + 0.1f)
+      continue; /* floor not above parent floor → not a box */
+    if (sec->ceiling_z >= par->ceiling_z - 0.1f)
+      continue; /* ceiling not below parent ceiling → not a box */
+    s_island_sectors[s_num_islands] = sec;
+    s_island_floor[s_num_islands] = sec->floor_z;
+    s_island_ceil[s_num_islands] = sec->ceiling_z;
+    s_num_islands++;
+  }
+
   /* Pass 0: Opaque geometry */
   visited_clear();
   render_sector_gpu(target, render_root, full_clip, 0, 0, -99999.0f, 99999.0f,
@@ -2428,8 +2542,8 @@ void ray_render_scene_gpu(GPU_Target *target, int current_sector) {
   /* Pass 1: Transparent liquids (Drawn after sprites so they can be seen
    * through) */
   visited_clear();
-  render_sector_gpu(target, current_sector, full_clip, 0, 0, -99999.0f,
-                    99999.0f, 1);
+  render_sector_gpu(target, render_root, full_clip, 0, 0, -99999.0f, 99999.0f,
+                    1);
 
   GPU_FlushBlitBuffer();
   GPU_SetDepthTest(target, 0);

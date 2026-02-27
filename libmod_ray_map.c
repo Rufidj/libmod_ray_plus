@@ -200,26 +200,32 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
   /* 1. Allocate memory */
   g_engine.num_sectors = 0;
   if (header->num_sectors > 0) {
-    // free existing if any? Assuming clean slate or handled by caller (like
-    // ray_unload_map)
+    if (g_engine.sectors)
+      free(g_engine.sectors);
     g_engine.sectors =
         (RAY_Sector *)calloc(header->num_sectors, sizeof(RAY_Sector));
     g_engine.sectors_capacity = header->num_sectors;
   }
   g_engine.num_portals = 0;
   if (header->num_portals > 0) {
+    if (g_engine.portals)
+      free(g_engine.portals);
     g_engine.portals =
         (RAY_Portal *)calloc(header->num_portals, sizeof(RAY_Portal));
     g_engine.portals_capacity = header->num_portals;
   }
   g_engine.num_sprites = 0;
   if (header->num_sprites > 0) {
+    if (g_engine.sprites)
+      free(g_engine.sprites);
     g_engine.sprites =
         (RAY_Sprite *)calloc(header->num_sprites, sizeof(RAY_Sprite));
     g_engine.sprites_capacity = header->num_sprites;
   }
   g_engine.num_spawn_flags = 0;
   if (header->num_spawn_flags > 0) {
+    if (g_engine.spawn_flags)
+      free(g_engine.spawn_flags);
     g_engine.spawn_flags =
         (RAY_SpawnFlag *)calloc(header->num_spawn_flags, sizeof(RAY_SpawnFlag));
     g_engine.spawn_flags_capacity = header->num_spawn_flags;
@@ -336,7 +342,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
       (void)fread(&s->parent_sector_id, sizeof(int), 1, file);
       (void)fread(&s->num_children, sizeof(int), 1, file);
 
-      if (s->num_children > 0 && s->num_children < 100) { // Sanity check
+      if (s->num_children > 0 &&
+          s->num_children < RAY_MAX_SECTORS) { // Sanity check
         s->children_capacity = s->num_children;
         s->child_sector_ids = (int *)malloc(s->num_children * sizeof(int));
         for (int c = 0; c < s->num_children; c++) {
@@ -361,8 +368,7 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
 
     // Allocate portal_ids array for the sector (runtime lookup)
     // We'll populate this when we read the portal list later
-    s->portals_capacity =
-        RAY_MAX_WALLS_PER_SECTOR; // Enough for 1 portal per wall
+    s->portals_capacity = s->walls_capacity; // Enough for 1 portal per wall
     s->portal_ids = (int *)calloc(s->portals_capacity, sizeof(int));
     s->num_portals = 0;
 

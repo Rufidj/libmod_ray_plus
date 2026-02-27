@@ -22,17 +22,17 @@
 
 #define RAY_WORLD_UNIT 128      /* Unidad base del mundo */
 #define RAY_TEXTURE_SIZE 128    /* Tamaño de texturas */
-#define RAY_MAX_SPRITES 1000    /* Máximo de sprites */
-#define RAY_MAX_SPAWN_FLAGS 100 /* Máximo de spawn flags */
-#define RAY_MAX_SECTORS 500     /* Máximo de sectores */
-#define RAY_MAX_PORTALS 1000    /* Máximo de portales */
-#define RAY_MAX_LIGHTS 32       /* Máximo de luces puntuales */
+#define RAY_MAX_SPRITES 2000    /* Máximo de sprites */
+#define RAY_MAX_SPAWN_FLAGS 500 /* Máximo de spawn flags */
+#define RAY_MAX_SECTORS 5000    /* Máximo de sectores */
+#define RAY_MAX_PORTALS 10000   /* Máximo de portales */
+#define RAY_MAX_LIGHTS 64       /* Máximo de luces puntuales */
 #define RAY_MAX_VERTICES_PER_SECTOR                                            \
-  64 /* Máximo vértices por sector (aumentado para mapas complejos) */
+  256 /* Máximo vértices por sector (aumentado para mapas complejos) */
 #define RAY_MAX_WALLS_PER_SECTOR                                               \
-  64 /* Máximo paredes por sector (aumentado para soportar hijos) */
+  256 /* Máximo paredes por sector (aumentado para soportar hijos) */
 #define RAY_MAX_RAYHITS                                                        \
-  256 /* Máximo hits de raycasting (aumentado para profundidad) */
+  1024 /* Máximo hits de raycasting (aumentado para profundidad) */
 #define RAY_TWO_PI (M_PI * 2.0f)
 
 /* Epsilon para comparaciones de coordenadas */
@@ -348,6 +348,9 @@ typedef struct {
   /* FPG de texturas */
   int fpg_id;
 
+  /* Física */
+  float default_step_height; /* Altura máxima de escalón (climbing) */
+
   /* Skybox */
   int skyTextureID; /* ID de textura para el cielo */
 
@@ -574,10 +577,6 @@ void ray_draw_wall_strip(GRAPH *dest, RAY_RayHit *hit, int screen_x,
                          int *clip_top, int *clip_bottom);
 uint32_t ray_sample_texture(GRAPH *texture, int tex_x, int tex_y);
 uint32_t ray_sample_texture_bilinear(GRAPH *texture, float u, float v);
-void render_sector_column_recursive(GRAPH *dest, int screen_x, float ray_angle,
-                                    int sector_id, int clip_top,
-                                    int clip_bottom, float *z_buffer,
-                                    int depth);
 void ray_cast_ray(RAY_Engine *engine, int sector_id, float x, float y,
                   float angle, int strip_idx, RAY_RayHit *hits, int *num_hits);
 uint32_t ray_fog_pixel(uint32_t pixel, float distance);

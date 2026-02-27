@@ -97,6 +97,10 @@ DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
          libmod_ray_set_sprite_md3_surface_texture),
     FUNC("RAY_LIGHT_ADD", "FFFIIIFF", TYPE_INT, libmod_ray_add_light),
     FUNC("RAY_LIGHT_CLEAR", "", TYPE_INT, libmod_ray_clear_lights),
+    FUNC("RAY_MOVE_SPRITE", "IFF", TYPE_INT, libmod_ray_move_sprite),
+    FUNC("RAY_SET_STEP_HEIGHT", "F", TYPE_INT, libmod_ray_set_step_height),
+    FUNC("RAY_GET_FLOOR_HEIGHT_Z", "FFF", TYPE_FLOAT,
+         libmod_ray_get_floor_height_z),
     FUNC(NULL, NULL, 0, NULL)};
 
 #endif
