@@ -1063,7 +1063,7 @@ static void ray_reconstruct_hierarchy(void) {
         p->child_sector_ids = (int *)realloc(
             p->child_sector_ids, p->children_capacity * sizeof(int));
       }
-      p->child_sector_ids[p->num_children++] = i;
+      p->child_sector_ids[p->num_children++] = child->sector_id;
     }
   }
 

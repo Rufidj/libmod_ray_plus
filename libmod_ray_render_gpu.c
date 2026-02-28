@@ -39,7 +39,7 @@ static void render_sprite_gpu(GPU_Target *target, RAY_Sprite *sprite);
    ============================================================================
  */
 
-#define MAX_PORTAL_DEPTH 128
+#define MAX_PORTAL_DEPTH 16
 #define MAX_SECTOR_VERTS 256
 #define NEAR_PLANE 0.1f
 #define FAR_PLANE 10000.0f
@@ -796,13 +796,17 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
     wv[i] = (sector->walls[i].y1 - min_y) / dy;
   }
 
-  if (num_valid < 3)
+  if (num_valid < 3) {
+    deactivate_normal_shader();
     return;
+  }
 
   /* Tessellate each fan triangle (subdivide 4x4=16) to reduce parallax/affine
      warping. By using many small triangles, the linear interpolation error of
      the GPU is minimized, resulting in a stable, non-deformed texture. */
-  float t_vb[MAX_SECTOR_VERTS * 16 * 3 * 5];
+  /* Use actual wall count instead of MAX to avoid stack overflow in recursion
+   */
+  float *t_vb = (float *)alloca(num_walls * 16 * 3 * 5 * sizeof(float));
   int t_nv = 0;
 
   for (int i = 1; i < num_walls - 1; i++) {
@@ -878,8 +882,10 @@ static void render_island_lid(GPU_Target *target, RAY_Sector *sector,
     }
   }
 
-  if (t_nv < 3)
+  if (t_nv < 3) {
+    deactivate_normal_shader();
     return;
+  }
 
   GPU_SetWrapMode(tex, GPU_WRAP_NONE, GPU_WRAP_NONE);
   GPU_SetImageFilter(tex, GPU_FILTER_LINEAR);
@@ -1765,17 +1771,52 @@ static void render_sector_gpu(GPU_Target *target, int sector_id, ClipRect clip,
     /* Disable backface culling — winding reverses when viewed from below */
     glDisable(GL_CULL_FACE);
 
-    if (render_floor && floor_tex) {
-      GPU_Image *floor_normal_tex = get_gpu_texture(0, sector->floor_normal_id);
-      render_island_lid(target, sector, sector->floor_z, floor_tex,
-                        floor_normal_tex, xf_walls, sector->num_walls, clip);
+    /* Check if sector polygon is convex.
+       Fan tessellation only works for convex polygons.
+       For concave sectors (C-shape, rings), render_sector_plane
+       already handles them correctly via scanline clipping. */
+    int is_convex = 1;
+    if (sector->num_walls >= 3) {
+      int sign = 0;
+      for (int w = 0; w < sector->num_walls; w++) {
+        int w1 = (w + 1) % sector->num_walls;
+        int w2 = (w + 2) % sector->num_walls;
+        float ax = sector->walls[w1].x1 - sector->walls[w].x1;
+        float ay = sector->walls[w1].y1 - sector->walls[w].y1;
+        float bx = sector->walls[w2].x1 - sector->walls[w1].x1;
+        float by = sector->walls[w2].y1 - sector->walls[w1].y1;
+        float cross = ax * by - ay * bx;
+        if (cross > 0.01f) {
+          if (sign < 0) {
+            is_convex = 0;
+            break;
+          }
+          sign = 1;
+        } else if (cross < -0.01f) {
+          if (sign > 0) {
+            is_convex = 0;
+            break;
+          }
+          sign = -1;
+        }
+      }
     }
-    if (render_ceil && ceil_tex) {
-      GPU_Image *ceil_normal_tex =
-          get_gpu_texture(0, sector->ceiling_normal_id);
-      render_island_lid(target, sector, sector->ceiling_z, ceil_tex,
-                        ceil_normal_tex, xf_walls, sector->num_walls, clip);
+
+    if (is_convex) {
+      if (render_floor && floor_tex) {
+        GPU_Image *floor_normal_tex =
+            get_gpu_texture(0, sector->floor_normal_id);
+        render_island_lid(target, sector, sector->floor_z, floor_tex,
+                          floor_normal_tex, xf_walls, sector->num_walls, clip);
+      }
+      if (render_ceil && ceil_tex) {
+        GPU_Image *ceil_normal_tex =
+            get_gpu_texture(0, sector->ceiling_normal_id);
+        render_island_lid(target, sector, sector->ceiling_z, ceil_tex,
+                          ceil_normal_tex, xf_walls, sector->num_walls, clip);
+      }
     }
+    /* Concave sectors are already rendered by render_sector_plane above */
   }
 
   /* ---- CHILD SECTORS (Room-over-Room / Nested) ---- */
@@ -2400,7 +2441,8 @@ void ray_render_frame_gpu(void *dest_graph_ptr) {
     return;
 
   int current_sector = g_engine.camera.current_sector_id;
-  if (current_sector < 0 || current_sector >= g_engine.num_sectors)
+  RAY_Sector *cam_sector = find_sector_by_id(current_sector);
+  if (!cam_sector)
     return;
 
   s_screen_w = g_engine.displayWidth;
@@ -2417,7 +2459,6 @@ void ray_render_frame_gpu(void *dest_graph_ptr) {
   s_horizon = s_half_h + (int)g_engine.camera.pitch;
 
   /* Set global fog from camera's current sector */
-  RAY_Sector *cam_sector = &g_engine.sectors[current_sector];
   s_fog_r = cam_sector->fog_color_r;
   s_fog_g = cam_sector->fog_color_g;
   s_fog_b = cam_sector->fog_color_b;
@@ -2458,24 +2499,23 @@ void ray_render_frame_gpu(void *dest_graph_ptr) {
       /* Calculate texture horizontal offset based on camera rotation.
          Angle 0.0 means center of texture.
          Rotate 360 degrees = full texture wrap. */
+
+      /* Calculate texture horizontal offset based on camera rotation. */
       float angle = g_engine.camera.rot;
-      /* Normalize to 0..2PI */
       angle = fmodf(angle, 2.0f * M_PI);
       if (angle < 0)
         angle += 2.0f * M_PI;
 
-      /* Horizontal coverage:
-         Screen width maps to FOV radians.
-         Full texture maps to 2*PI radians. */
-      float fov_ratio = g_engine.fovRadians / (2.0f * M_PI);
+      /* DOOM STYLE: Larger coverage to avoid fast repetition */
       float u_center = angle / (2.0f * M_PI);
+      float fov_ratio = g_engine.fovRadians / (2.0f * M_PI);
+
       float u0 = u_center - fov_ratio * 0.5f;
       float u1 = u_center + fov_ratio * 0.5f;
 
-      /* For pitch, offset vertically.
-         A simple approximation for old-school look:
-         Sky is centered at horizon. */
-      float v_offset = (float)g_engine.camera.pitch / (float)s_screen_h;
+      /* Vertical: Doom skies are centered at horizon and move 1:1 with pitch or
+       * slower */
+      float v_offset = (float)g_engine.camera.pitch / (float)s_screen_h * 0.8f;
       float v0 = 0.0f - v_offset;
       float v1 = 1.0f - v_offset;
 
@@ -2546,9 +2586,10 @@ void ray_render_scene_gpu(GPU_Target *target, int current_sector) {
 
   /* Find root parent for correct nested context */
   int render_root = current_sector;
-  while (render_root >= 0 && render_root < g_engine.num_sectors &&
-         g_engine.sectors[render_root].parent_sector_id != -1) {
-    render_root = g_engine.sectors[render_root].parent_sector_id;
+  RAY_Sector *rr_sec = find_sector_by_id(render_root);
+  while (rr_sec && rr_sec->parent_sector_id != -1) {
+    render_root = rr_sec->parent_sector_id;
+    rr_sec = find_sector_by_id(render_root);
   }
 
   /* Pre-build island cache for sprite occlusion (once per frame).
