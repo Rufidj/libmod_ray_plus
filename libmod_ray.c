@@ -36,7 +36,7 @@ static int g_use_gpu = 1;                     // Default: Software
 
 extern void ray_detect_portals(RAY_Engine *engine);
 extern int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
-                               float new_x, float new_y);
+                               float new_x, float new_y, float step_h);
 
 /* ============================================================================
    INICIALIZACIÓN Y FINALIZACIÓN
@@ -515,6 +515,36 @@ int64_t libmod_ray_get_camera_pitch(INSTANCE *my, int64_t *params) {
   return (int64_t) * (int32_t *)&val;
 }
 
+int64_t libmod_ray_get_sprite_x(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return 0;
+  int id = (int)params[0];
+  if (id < 0 || id >= g_engine.num_sprites)
+    return 0;
+  float val = g_engine.sprites[id].x;
+  return (int64_t) * (int32_t *)&val;
+}
+
+int64_t libmod_ray_get_sprite_y(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return 0;
+  int id = (int)params[0];
+  if (id < 0 || id >= g_engine.num_sprites)
+    return 0;
+  float val = g_engine.sprites[id].y;
+  return (int64_t) * (int32_t *)&val;
+}
+
+int64_t libmod_ray_get_sprite_z(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return 0;
+  int id = (int)params[0];
+  if (id < 0 || id >= g_engine.num_sprites)
+    return 0;
+  float val = g_engine.sprites[id].z;
+  return (int64_t) * (int32_t *)&val;
+}
+
 /* ============================================================================
    CÁMARA - SETTER
    ============================================================================
@@ -567,7 +597,8 @@ int64_t libmod_ray_move_forward(INSTANCE *my, int64_t *params) {
                                        speed; // Fixed: Matches renderer (+sin)
 
   if (!ray_check_collision(&g_engine, g_engine.camera.x, g_engine.camera.y,
-                           g_engine.camera.z, newX, newY)) {
+                           g_engine.camera.z, newX, newY,
+                           g_engine.default_step_height)) {
     g_engine.camera.x = newX;
     g_engine.camera.y = newY;
 
@@ -605,7 +636,8 @@ int64_t libmod_ray_move_backward(INSTANCE *my, int64_t *params) {
   float newY = g_engine.camera.y - sinf(g_engine.camera.rot) * speed;
 
   if (!ray_check_collision(&g_engine, g_engine.camera.x, g_engine.camera.y,
-                           g_engine.camera.z, newX, newY)) {
+                           g_engine.camera.z, newX, newY,
+                           g_engine.default_step_height)) {
     g_engine.camera.x = newX;
     g_engine.camera.y = newY;
 
@@ -644,7 +676,8 @@ int64_t libmod_ray_strafe_left(INSTANCE *my, int64_t *params) {
   float newY = g_engine.camera.y + sinf(g_engine.camera.rot - M_PI / 2) * speed;
 
   if (!ray_check_collision(&g_engine, g_engine.camera.x, g_engine.camera.y,
-                           g_engine.camera.z, newX, newY)) {
+                           g_engine.camera.z, newX, newY,
+                           g_engine.default_step_height)) {
     g_engine.camera.x = newX;
     g_engine.camera.y = newY;
 
@@ -683,7 +716,8 @@ int64_t libmod_ray_strafe_right(INSTANCE *my, int64_t *params) {
   float newY = g_engine.camera.y + sinf(g_engine.camera.rot + M_PI / 2) * speed;
 
   if (!ray_check_collision(&g_engine, g_engine.camera.x, g_engine.camera.y,
-                           g_engine.camera.z, newX, newY)) {
+                           g_engine.camera.z, newX, newY,
+                           g_engine.default_step_height)) {
     g_engine.camera.x = newX;
     g_engine.camera.y = newY;
 
@@ -898,7 +932,8 @@ int64_t libmod_ray_check_collision(INSTANCE *my, int64_t *params) {
   float new_x = *(float *)&params[2];
   float new_y = *(float *)&params[3];
 
-  return ray_check_collision(&g_engine, x, y, g_engine.camera.z, new_x, new_y);
+  return ray_check_collision(&g_engine, x, y, g_engine.camera.z, new_x, new_y,
+                             g_engine.default_step_height);
 }
 
 int64_t libmod_ray_check_collision_z(INSTANCE *my, int64_t *params) {
@@ -911,7 +946,8 @@ int64_t libmod_ray_check_collision_z(INSTANCE *my, int64_t *params) {
   float new_x = *(float *)&params[3];
   float new_y = *(float *)&params[4];
 
-  return ray_check_collision(&g_engine, x, y, z, new_x, new_y);
+  return ray_check_collision(&g_engine, x, y, z, new_x, new_y,
+                             g_engine.default_step_height);
 }
 
 int64_t libmod_ray_set_minimap(INSTANCE *my, int64_t *params) {
@@ -1796,7 +1832,8 @@ int64_t libmod_ray_move_sprite(INSTANCE *my, int64_t *params) {
   float old_engine_step = g_engine.default_step_height;
   g_engine.default_step_height = step_h;
 
-  int blocked = ray_check_collision(&g_engine, s->x, s->y, s->z, newX, newY);
+  int blocked =
+      ray_check_collision(&g_engine, s->x, s->y, s->z, newX, newY, step_h);
 
   g_engine.default_step_height = old_engine_step;
 
@@ -1823,6 +1860,67 @@ int64_t libmod_ray_move_sprite(INSTANCE *my, int64_t *params) {
   }
 
   return 0; // Bloqueado
+}
+
+int64_t libmod_ray_check_collision_h(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return 0;
+
+  float x = *(float *)&params[0];
+  float y = *(float *)&params[1];
+  float z = *(float *)&params[2];
+  float new_x = *(float *)&params[3];
+  float new_y = *(float *)&params[4];
+  float step_h = *(float *)&params[5];
+
+  return ray_check_collision(&g_engine, x, y, z, new_x, new_y, step_h);
+}
+
+int64_t libmod_ray_check_sprite_collision(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return -1;
+
+  int self_id = (int)params[0];
+  float new_x = *(float *)&params[1];
+  float new_y = *(float *)&params[2];
+  float radius = *(float *)&params[3];
+
+  if (radius <= 0.0f)
+    radius = 32.0f;
+
+  for (int i = 0; i < g_engine.num_sprites; i++) {
+    if (i == self_id)
+      continue;
+    RAY_Sprite *other = &g_engine.sprites[i];
+    if (other->hidden || other->cleanup)
+      continue;
+
+    float other_radius =
+        (other->col_w > 0) ? other->col_w / 2.0f : other->w / 2.0f;
+    float min_dist = radius + other_radius;
+
+    float dx = new_x - other->x;
+    float dy = new_y - other->y;
+    float dist_sq = dx * dx + dy * dy;
+
+    if (dist_sq < min_dist * min_dist) {
+      float self_z = 0;
+      if (self_id >= 0 && self_id < g_engine.num_sprites) {
+        self_z = g_engine.sprites[self_id].z;
+      }
+      float self_h = (self_id >= 0 && self_id < g_engine.num_sprites)
+                         ? (g_engine.sprites[self_id].col_h > 0
+                                ? g_engine.sprites[self_id].col_h
+                                : g_engine.sprites[self_id].h)
+                         : 64.0f;
+      float other_h = (other->col_h > 0) ? other->col_h : other->h;
+
+      if (self_z < other->z + other_h && self_z + self_h > other->z) {
+        return i;
+      }
+    }
+  }
+  return -1;
 }
 
 void __bgdexport(libmod_ray, module_initialize)() {}

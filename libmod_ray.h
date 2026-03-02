@@ -231,7 +231,51 @@ typedef struct {
   int glb_anim_index;
   float glb_anim_time;
   float glb_anim_speed;
+
+  /* Physics body (NULL = no physics, static sprite) */
+  struct RAY_PhysicsBody *physics;
 } RAY_Sprite;
+
+/* ============================================================================
+   PHYSICS BODY - Rigid body simulation properties
+   ============================================================================
+ */
+typedef struct RAY_PhysicsBody {
+  /* Linear motion */
+  float vx, vy, vz; /* Velocity (units/sec) */
+  float ax, ay, az; /* Accumulated forces/acceleration */
+
+  /* Angular motion */
+  float ang_vx, ang_vy, ang_vz; /* Angular velocity (rad/sec) */
+  float rot_x, rot_y;           /* Current tilt angles (pitch/roll) */
+
+  /* Material properties */
+  float mass;            /* Mass in kg (0 = infinite/static) */
+  float inv_mass;        /* Precomputed 1/mass (0 if static) */
+  float friction;        /* Surface friction [0..1] */
+  float restitution;     /* Bounciness [0..1] */
+  float gravity_scale;   /* Gravity multiplier (1.0 = normal) */
+  float linear_damping;  /* Air resistance for movement [0..1] */
+  float angular_damping; /* Air resistance for rotation [0..1] */
+
+  /* Collision shape */
+  float col_radius; /* Bounding sphere/cylinder radius */
+  float col_height; /* Vertical extent */
+
+  /* Flags */
+  int is_static;       /* 1 = immovable */
+  int is_kinematic;    /* 1 = moved by code, not physics */
+  int is_trigger;      /* 1 = overlap detection only */
+  int lock_rot_x;      /* 1 = prevent tipping on X */
+  int lock_rot_y;      /* 1 = prevent tipping on Y */
+  int lock_rot_z;      /* 1 = prevent spinning on Z */
+  int on_ground;       /* 1 = resting on a surface */
+  int collision_layer; /* Bitmask for collision filtering */
+  int collision_mask;  /* Which layers this body collides with */
+
+  /* Sector awareness */
+  int current_sector_id; /* Which sector this body is in */
+} RAY_PhysicsBody;
 
 /* ============================================================================
    SPAWN FLAGS - Posiciones de spawn para sprites
@@ -478,9 +522,57 @@ extern int64_t libmod_ray_camera_free(INSTANCE *my, int64_t *params);
 extern int64_t libmod_ray_set_fov(INSTANCE *my, int64_t *params);
 extern int64_t libmod_ray_set_texture_quality(INSTANCE *my, int64_t *params);
 
+/* Distances (v29+) */
+extern int64_t libmod_ray_get_dist(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_get_camera_dist(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_get_point_dist(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_get_angle(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_get_camera_angle(INSTANCE *my, int64_t *params);
+
 /* Iluminación */
 extern int64_t libmod_ray_add_light(INSTANCE *my, int64_t *params);
 extern int64_t libmod_ray_clear_lights(INSTANCE *my, int64_t *params);
+
+/* ============================================================================
+   PHYSICS ENGINE
+   ============================================================================
+ */
+
+/* Core physics functions (C API) */
+extern void ray_physics_init(void);
+extern void ray_physics_step(float dt);
+extern RAY_PhysicsBody *ray_physics_create_body(float mass, float radius,
+                                                float height);
+extern void ray_physics_destroy_body(RAY_PhysicsBody *body);
+extern void ray_physics_apply_force(RAY_PhysicsBody *body, float fx, float fy,
+                                    float fz);
+extern void ray_physics_apply_impulse(RAY_PhysicsBody *body, float ix, float iy,
+                                      float iz);
+extern void ray_physics_set_velocity(RAY_PhysicsBody *body, float vx, float vy,
+                                     float vz);
+
+/* BennuGD2 bindings */
+extern int64_t libmod_ray_physics_enable(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_mass(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_friction(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_restitution(INSTANCE *my,
+                                                  int64_t *params);
+extern int64_t libmod_ray_physics_set_gravity_scale(INSTANCE *my,
+                                                    int64_t *params);
+extern int64_t libmod_ray_physics_set_damping(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_static(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_kinematic(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_trigger(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_set_lock_rotation(INSTANCE *my,
+                                                    int64_t *params);
+extern int64_t libmod_ray_physics_set_collision_layer(INSTANCE *my,
+                                                      int64_t *params);
+extern int64_t libmod_ray_physics_apply_force_bgd(INSTANCE *my,
+                                                  int64_t *params);
+extern int64_t libmod_ray_physics_apply_impulse_bgd(INSTANCE *my,
+                                                    int64_t *params);
+extern int64_t libmod_ray_physics_get_velocity(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_physics_step_bgd(INSTANCE *my, int64_t *params);
 
 /* ============================================================================
    FUNCIONES INTERNAS - Geometría
@@ -490,6 +582,7 @@ extern int64_t libmod_ray_clear_lights(INSTANCE *my, int64_t *params);
 /* Geometría de polígonos */
 int ray_point_in_polygon(float px, float py, const RAY_Point *vertices,
                          int num_vertices);
+int ray_point_in_sector_local(RAY_Sector *sector, float px, float py);
 int ray_polygon_is_convex(const RAY_Point *vertices, int num_vertices);
 int ray_line_segment_intersect(float x1, float y1, float x2, float y2, float x3,
                                float y3, float x4, float y4, float *ix,

@@ -31,7 +31,6 @@ set(SOURCES_LIBMOD_RAY
     libmod_ray_raycasting.c
     libmod_ray_render.c
     libmod_ray_geometry.c
-    libmod_ray_render_recursive.c
     libmod_ray_render_build.c
     # libmod_ray_render_decals.c (Removed in Ray Plus)
     libmod_ray_camera.c
@@ -41,6 +40,7 @@ set(SOURCES_LIBMOD_RAY
     libmod_ray_render_md3.c
     libmod_ray_gltf.c
     libmod_ray_render_gpu.c
+    libmod_ray_physics.c
 )
 
 add_library(mod_ray ${LIBRARY_BUILD_TYPE} ${SOURCES_LIBMOD_RAY})

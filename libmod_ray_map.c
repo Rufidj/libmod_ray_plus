@@ -20,7 +20,7 @@ extern void ray_detect_portals(RAY_Engine *engine);
 static void ray_detect_shared_walls_with_children(void);
 static void ray_detect_all_shared_walls(void);
 static void ray_reconstruct_hierarchy(void);
-static int ray_point_in_sector_local(RAY_Sector *sector, float px, float py);
+int ray_point_in_sector_local(RAY_Sector *sector, float px, float py);
 static float ray_sector_area(RAY_Sector *s);
 
 /* ============================================================================
@@ -196,8 +196,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     return 0;
 
   int map_version = header->version;
-  if (map_version < 9 || map_version > 28) {
-    printf("RAY: ERROR - Map version %d not supported by this engine (9-28 "
+  if (map_version < 9 || map_version > 30) {
+    printf("RAY: ERROR - Map version %d not supported by this engine (9-30 "
            "only)\n",
            map_version);
     return 0;
@@ -628,9 +628,9 @@ int ray_load_map(const char *filename) {
   // Support for v27 (Fluid Speed)
   if (header.version > 9 && header.version < 22) {
     printf("RAY: Warning - Map version %u is old.\n", header.version);
-  } else if (header.version > 28) {
+  } else if (header.version > 30) {
     printf("RAY: Warning - Map version %u is newer than expected (max "
-           "supported: 28). "
+           "supported: 30). "
            "Attempts to load might fail.\n",
            header.version);
   }
@@ -665,7 +665,7 @@ static float ray_sector_area(RAY_Sector *s) {
 /* Helper to check point inside sector (Simple PIP) */
 /* Re-implementing simplified version to avoid dependency issues if external
  * func not available */
-static int ray_point_in_sector_local(RAY_Sector *sector, float x, float y) {
+int ray_point_in_sector_local(RAY_Sector *sector, float x, float y) {
   int i, j, c = 0;
   for (i = 0, j = sector->num_vertices - 1; i < sector->num_vertices; j = i++) {
     if (((sector->vertices[i].y > y) != (sector->vertices[j].y > y)) &&

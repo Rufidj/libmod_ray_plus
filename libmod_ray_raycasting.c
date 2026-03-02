@@ -303,7 +303,7 @@ void ray_cast_sprites(RAY_Engine *engine, float ray_angle, int strip_idx,
  */
 
 int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
-                        float new_x, float new_y) {
+                        float new_x, float new_y, float step_h) {
   if (!engine)
     return 0;
 
@@ -312,7 +312,6 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
     return 1;
 
   /* 1. Wall intersection check (current sector + descendants) */
-  // We should check all local geometry to handle building collisions properly
   RAY_RayHit local_hits[128];
   int num_hits = 0;
   float dx = new_x - x;
@@ -326,41 +325,72 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
   for (int i = 0; i < num_hits; i++) {
     if (local_hits[i].distance < dist + 1.0f &&
         !ray_wall_is_portal(local_hits[i].wall)) {
-      // Check height
-      RAY_Sector *s = resolve_sector(engine, local_hits[i].sector_id);
-      if (s) {
-        float wall_top = s->ceiling_z;
-        float wall_bot = s->floor_z;
-        // If player Z is within wall Z range, or wall is higher than step
-        // height
-        if (z < wall_top && z + 32.0f > wall_bot) {
-          return 1; // Collision
+      /* This wall is in our path and is NOT a portal - check heights */
+      RAY_Sector *wall_sector = resolve_sector(engine, local_hits[i].sector_id);
+      if (wall_sector) {
+        float wall_floor = wall_sector->floor_z;
+        float wall_ceil = wall_sector->ceiling_z;
+
+        /* Block if:
+         * - The wall's floor is higher than what we can step up to
+         * - OR the wall's ceiling is lower than our head height
+         * - OR the wall belongs to a solid sector (building) that we're
+         *   trying to enter from outside
+         */
+        float floor_diff = wall_floor - z;
+
+        /* Can't step up: floor too high */
+        if (floor_diff > step_h) {
+          return 1;
+        }
+
+        /* Ceiling too low to pass under */
+        if (wall_ceil < z + step_h && wall_ceil > z) {
+          return 1;
+        }
+
+        /* Solid building sector: always block if not already inside it */
+        if (ray_sector_is_solid(wall_sector) &&
+            wall_sector->sector_id != current_sector->sector_id) {
+          return 1;
         }
       }
     }
   }
 
-  /* 2. Check destination sector floor/ceil */
+  /* 2. Check destination: are we entering a solid sector? */
   RAY_Sector *new_sector = ray_find_sector_at_position(engine, new_x, new_y, z);
   if (!new_sector)
     return 1;
 
-  /* 3. Prevent entering pits/pools: scan child sectors of the current sector.
-     If any point within a collision margin of the destination falls inside a
-     pit/pool child sector, block the movement. The margin prevents the
-     object from visually entering the pool before collision is detected. */
-  float step_height = 2.0f;
-  float col_margin = 100.0f; /* Collision margin around center point */
+  /* If destination is inside a solid sector (building), block unless we're
+   * already in that sector or the step up is small enough */
+  if (ray_sector_is_solid(new_sector) &&
+      new_sector->sector_id != current_sector->sector_id) {
+    float floor_diff = new_sector->floor_z - z;
+    if (floor_diff > step_h) {
+      return 1; /* Can't climb this building */
+    }
+  }
+
+  /* 3. Floor height check at destination - prevent stepping up too high */
+  float dest_floor = new_sector->floor_z;
+  float floor_step = dest_floor - z;
+  if (floor_step > step_h) {
+    return 1; /* Floor at destination too high to step onto */
+  }
+
+  /* 4. Prevent entering pits/pools */
+  float pit_step = 2.0f;
+  float col_margin = 100.0f;
   for (int c = 0; c < current_sector->num_children; c++) {
     int child_id = current_sector->child_sector_ids[c];
     if (child_id < 0 || child_id >= engine->num_sectors)
       continue;
     RAY_Sector *child = &engine->sectors[child_id];
-    /* Only block if child floor is a significant drop (pit/pool) */
     float drop = current_sector->floor_z - child->floor_z;
-    if (drop <= step_height)
+    if (drop <= pit_step)
       continue;
-    /* Check center and 4 cardinal points around destination */
     if (ray_point_in_polygon(new_x, new_y, child->vertices,
                              child->num_vertices) ||
         ray_point_in_polygon(new_x + col_margin, new_y, child->vertices,
@@ -371,7 +401,7 @@ int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
                              child->num_vertices) ||
         ray_point_in_polygon(new_x, new_y - col_margin, child->vertices,
                              child->num_vertices)) {
-      return 1; /* Block: would fall into pit/pool */
+      return 1;
     }
   }
 
