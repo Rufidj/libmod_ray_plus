@@ -1,6 +1,7 @@
 #include "libmod_ray.h"
 #include "libmod_ray_md3.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 extern RAY_Engine g_engine;
@@ -39,6 +40,9 @@ static void setup_edge_md3(EdgeMD3 *edge, RAY_Point *p1, RAY_Point *p2,
   }
 }
 
+extern float g_wall_col_depth[];
+extern uint8_t *g_wall_coverage;
+
 static void rasterize_scanline_md3(GRAPH *dest, int y, EdgeMD3 *left,
                                    EdgeMD3 *right, int textureID) {
   if (left->x > right->x) {
@@ -47,7 +51,7 @@ static void rasterize_scanline_md3(GRAPH *dest, int y, EdgeMD3 *left,
     right = tmp;
   }
   int x1 = (int)ceilf(left->x), x2 = (int)ceilf(right->x);
-  int iw = g_engine.internalWidth;
+  int iw = g_engine.displayWidth;
   if (x1 < 0)
     x1 = 0;
   if (x2 > iw)
@@ -68,10 +72,37 @@ static void rasterize_scanline_md3(GRAPH *dest, int y, EdgeMD3 *left,
                                     ? bitmap_get(0, textureID)
                                     : bitmap_get(g_engine.fpg_id, textureID))
                              : NULL;
+  static int md3_debug_frame = 0;
+  int do_debug = (md3_debug_frame++ % 3000 == 0);
   for (int x = x1; x < x2; x++) {
     int idx = y * iw + x;
     float z = 1.0f / (iz > 0.000001f ? iz : 0.000001f);
+    // Coverage-based occlusion: if this pixel was already drawn by a
+    // wall/floor/ceiling, only draw the MD3 if it's actually closer
+    if (g_wall_coverage && g_wall_coverage[idx]) {
+      // Pixel is covered by BSP geometry — use z-buffer for correct ordering
+      if (z >= g_zbuffer[idx]) {
+        iz += tiz;
+        uz += tuz;
+        vz += tvz;
+        continue;
+      }
+    }
+    // Also check per-column wall depth as secondary guard
+    if (z >= g_wall_col_depth[x]) {
+      iz += tiz;
+      uz += tuz;
+      vz += tvz;
+      continue;
+    }
     if (z < g_zbuffer[idx] - 0.1f) {
+      if (do_debug) {
+        printf("MD3 DRAW: x=%d y=%d md3_z=%.2f zbuf=%.2f coverage=%d "
+               "wall_col=%.2f\n",
+               x, y, z, g_zbuffer[idx],
+               g_wall_coverage ? g_wall_coverage[idx] : -1,
+               g_wall_col_depth[x]);
+      }
       uint32_t color = 0xAA00AA;
       if (tex) {
         float u = uz * z;
@@ -206,11 +237,11 @@ void ray_render_md3(GRAPH *dest, RAY_Sprite *sprite) {
   RAY_MD3_Model *model = (RAY_MD3_Model *)sprite->model;
   float cs_cam = cosf(g_engine.camera.rot), sn_cam = sinf(g_engine.camera.rot);
   float cs_mod = cosf(sprite->rot), sn_mod = sinf(sprite->rot);
-  int iw = g_engine.internalWidth, ih = g_engine.internalHeight;
-  /* ANCHORED FOCAL LENGTH: Syced with Build Engine Walls */
-  float focal = (float)iw * 0.5f;
-  float hx = (float)iw * 0.5f;
-  float hy = (float)ih * 0.5f + g_engine.camera.pitch;
+  int iw = g_engine.displayWidth, ih = g_engine.displayHeight;
+  /* ANCHORED FOCAL LENGTH: Synced with Build Engine Walls */
+  float focal = (float)g_engine.displayWidth * 0.5f;
+  float hx = (float)g_engine.displayWidth * 0.5f;
+  float hy = (float)g_engine.displayHeight * 0.5f + g_engine.camera.pitch;
   float scale = sprite->model_scale > 0 ? sprite->model_scale : 1.0f;
   float interp = sprite->interpolation;
 
