@@ -18,9 +18,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* OpenGL for depth buffer control */
+/* OpenGL/GLES for depth buffer control */
 #ifdef _WIN32
 #include <GL/glew.h>
+#elif defined(__ANDROID__)
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#elif defined(VITA)
+#include <vitaGL.h>
 #else
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -2295,8 +2300,12 @@ static void ray_render_gltf_gpu(GPU_Target *target, RAY_Sprite *sprite) {
           glEnable(GL_DEPTH_TEST);
           glDepthMask(GL_TRUE);
           glDepthFunc(GL_LESS);
+#ifndef __ANDROID__
+#ifndef VITA
           glEnable(GL_ALPHA_TEST);
           glAlphaFunc(GL_GREATER, 0.1f);
+#endif
+#endif
 
           GPU_TriangleBatch(img, target, v_added, batch_vb, 0, NULL,
                             GPU_BATCH_XYZ_ST);
@@ -2304,7 +2313,11 @@ static void ray_render_gltf_gpu(GPU_Target *target, RAY_Sprite *sprite) {
 
           GPU_SetBlending(img, 1);
           glDisable(GL_DEPTH_TEST);
+#ifndef __ANDROID__
+#ifndef VITA
           glDisable(GL_ALPHA_TEST);
+#endif
+#endif
         }
         free(batch_vb);
       }

@@ -7,11 +7,16 @@
 
 #include "libmod_ray.h"
 #include "libmod_ray_compat.h"
+#ifdef __ANDROID__
+#include "SDL.h"
+#else
 #include <SDL2/SDL.h>
+#endif
 #include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <time.h>
 
 extern RAY_Engine g_engine;
@@ -415,20 +420,17 @@ static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
   // Optimized Fallback/Sky logic if no texture
   if (!texture) {
     if (flags & 1) {
-      // Hole Punch: Just clear Z
       for (int y = y_start; y <= y_end; y++) {
         g_zbuffer[ylookup[y] + x] = RAY_INFINITY;
       }
     } else {
-      // Draw Sky or Fallback Gray
       if (g_engine.skyTextureID > 0) {
         draw_sky_column(dest, x, y_start, y_end);
       } else {
         uint32_t fallback_color = (height_diff > 0) ? 0xFF505050 : 0xFF707070;
         for (int y = y_start; y <= y_end; y++) {
-          int i = y * g_engine.displayWidth + x;
-          if (g_zbuffer[i] < RAY_INFINITY)
-            continue; // Basic Z check
+          int i = ylookup[y] + x;
+          if (g_zbuffer[i] < RAY_INFINITY) continue;
           FAST_PUT_PIXEL(dest, x, y, fallback_color);
           g_zbuffer[i] = RAY_INFINITY;
         }
@@ -437,136 +439,89 @@ static void draw_plane_column(GRAPH *dest, int x, int y_start, int y_end,
     return;
   }
 
+  /* Pre-calculate constants outside the loop */
   float cos_rot = cosf(g_engine.camera.rot);
   float sin_rot = sinf(g_engine.camera.rot);
   float half_w = (float)g_engine.displayWidth / 2.0f;
   float half_h = (float)g_engine.displayHeight / 2.0f;
-
   float x_offset = (float)x - half_w;
   float view_dist = (float)halfxdimen;
-
   float ray_dir_x = view_dist * cos_rot - x_offset * sin_rot;
   float ray_dir_y = view_dist * sin_rot + x_offset * cos_rot;
-
-  // Constant for depth calc
   float Z_numerator = fabsf(height_diff * view_dist);
 
-  // SAFETY: Clamp Y range to screen
-  if (x < 0 || x >= g_engine.displayWidth)
-    return;
-  if (y_start < 0)
-    y_start = 0;
-  if (y_end >= g_engine.displayHeight)
-    y_end = g_engine.displayHeight - 1;
-  if (y_start > y_end)
-    return;
+  uint32_t *dest_pixels = (uint32_t *)dest->surface->pixels;
+  int dest_pitch = dest->surface->pitch >> 2;
+  uint32_t *tex_pixels = (uint32_t *)texture->surface->pixels;
+  int tex_pitch = texture->surface->pitch >> 2;
+  int tex_w = texture->width;
+  int tex_h = texture->height;
+  int tex_w_mask = tex_w - 1;
+  int tex_h_mask = tex_h - 1;
+  bool is_pot = ((tex_w & (tex_w - 1)) == 0) && ((tex_h & (tex_h - 1)) == 0);
 
-  // SAFETY: Check Surface
-  // if (!dest->surface) return;
-
-  // No Lock/Direct Ptr
-
-  // UNSAFE OPTIMIZATION: Get pointer if possible
-  uint32_t *screen_ptr = NULL;
-  int pitch_ints = 0;
-  if (dest->surface) {
-    pitch_ints = dest->surface->pitch >> 2;
-    screen_ptr = (uint32_t *)dest->surface->pixels + y_start * pitch_ints + x;
+  /* Liquid/Fluid pre-calculation */
+  float liq_x = 0, liq_y = 0;
+  if ((sector_flags & 7) && (sector_flags & 256)) {
+      float t = g_engine.time * liquid_speed;
+      liq_x = sinf(t * 3.0f) * 16.0f * liquid_intensity;
+      liq_y = cosf(t * 2.5f) * 16.0f * liquid_intensity;
   }
 
+  uint32_t *screen_ptr = dest_pixels + y_start * dest_pitch + x;
+  bool use_fog = g_engine.fogOn;
+
   for (int y = y_start; y <= y_end; y++) {
-    // int i = y * g_engine.displayWidth + x;
-    int i = ylookup[y] + x;
+    int pixel_idx = ylookup[y] + x;
 
     // HOLE PUNCH: Reset Z to infinity
     if (flags & 1) {
-      g_zbuffer[i] = RAY_INFINITY;
-      if (screen_ptr)
-        screen_ptr += pitch_ints;
+      g_zbuffer[pixel_idx] = RAY_INFINITY;
+      if (screen_ptr) screen_ptr += dest_pitch;
       continue;
     }
 
     float dy = (float)y - half_h;
     if (fabsf(dy) < 0.1f) {
-      if (screen_ptr)
-        screen_ptr += pitch_ints;
+      if (screen_ptr) screen_ptr += dest_pitch;
       continue;
     }
 
     // Z Calc
     float z_depth = Z_numerator / fabsf(dy);
 
-    if (z_depth >= g_zbuffer[i]) { // Occluded
-      if (screen_ptr)
-        screen_ptr += pitch_ints;
+    /* Early Z-Buffer Check */
+    if (z_depth >= g_zbuffer[pixel_idx]) {
+      if (screen_ptr) screen_ptr += dest_pitch;
       continue;
     }
 
-    // Write Z if visible (and we are drawing)
-    g_zbuffer[i] = z_depth;
-    g_wall_coverage[i] = 1;
-
-    // Texture mapping
     float scale = z_depth / view_dist;
+    float map_x = g_engine.camera.x + ray_dir_x * scale + u_off + liq_x;
+    float map_y = g_engine.camera.y + ray_dir_y * scale + v_off + liq_y;
 
-    float map_x = g_engine.camera.x + ray_dir_x * scale + u_off;
-    float map_y = g_engine.camera.y + ray_dir_y * scale + v_off;
-
-    // Fluid distortion
-    if ((sector_flags & 7) && (sector_flags & 256)) {
-      float intensity = liquid_intensity;
-      if (intensity < 0.001f)
-        intensity = 1.0f;
-      float speed = liquid_speed;
-      float t = g_engine.time * speed;
-
-      if (sector_flags & 1) { // Water
-        map_x += sinf(map_y * 0.1f + t * 3.0f) * 16.0f * intensity;
-        map_y += cosf(map_x * 0.1f + t * 2.5f) * 16.0f * intensity;
-      } else if (sector_flags & 2) { // Lava
-        map_x += sinf(map_y * 0.05f + t * 1.5f) * 24.0f * intensity;
-        map_y += cosf(map_x * 0.05f + t * 1.2f) * 24.0f * intensity;
-      } else if (sector_flags & 4) { // Acid
-        map_x += sinf(map_y * 0.2f + t * 6.0f) * 8.0f * intensity;
-        map_y += cosf(map_x * 0.2f + t * 6.0f) * 8.0f * intensity;
-      }
+    int tx, ty;
+    if (is_pot) {
+      tx = (int)map_x & tex_w_mask;
+      ty = (int)map_y & tex_h_mask;
+    } else {
+      tx = (int)map_x % tex_w; if (tx < 0) tx += tex_w;
+      ty = (int)map_y % tex_h; if (ty < 0) ty += tex_h;
     }
 
-    int tex_w = texture->width;
-    int tex_h = texture->height;
+    uint32_t pixel = tex_pixels[ty * tex_pitch + tx];
+    if (use_fog) pixel = ray_fog_pixel(pixel, z_depth);
 
-    int tex_x = ((int)map_x) % tex_w;
-    int tex_y = ((int)map_y) % tex_h;
-
-    // Fast modulo fix for negatives
-    if (tex_x < 0)
-      tex_x += tex_w;
-    if (tex_y < 0)
-      tex_y += tex_h;
-
-    // SAFE TEXTURE READ (No pointer arithmetic on texture)
-    uint32_t pixel = ray_sample_texture(texture, tex_x, tex_y);
-
-    if (g_engine.fogOn) {
-      pixel = ray_fog_pixel(pixel, z_depth);
-    }
-
-    // TRANSPARENCY: Blend if it's a fluid
     if (sector_flags & 7) {
-      uint32_t bg = FAST_GET_PIXEL(dest, x, y);
-      // Rough 50/50 blend (0xFEFEFE avoids overflow bit bleeding)
+      uint32_t bg = *screen_ptr;
       pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
     }
 
-    // UNSAFE WRITE
-    if (screen_ptr) {
-      *screen_ptr = pixel;
-    } else {
-      FAST_PUT_PIXEL(dest, x, y, pixel);
-    }
-
-    if (screen_ptr)
-      screen_ptr += pitch_ints;
+    *screen_ptr = pixel;
+    g_zbuffer[pixel_idx] = z_depth;
+    g_wall_coverage[pixel_idx] = 1;
+    
+    if (screen_ptr) screen_ptr += dest_pitch;
   }
 }
 
@@ -751,66 +706,62 @@ draw_wall_segment_linear(GRAPH *dest, int x1, int x2, int y1_ceil, int y2_ceil,
         float base_v = (float)(y_top - curr_y_ceil) * v_step;
         float curr_v = base_v + (float)(draw_top - y_top) * v_step;
 
+        /* FIXED POINT MATH for inner loop speedup */
+        int v_step_fp = (int)(v_step * 65536.0f);
+        int curr_v_fp = (int)(curr_v * 65536.0f);
+
         int last_tex_y = -999;
         uint32_t cached_pixel = 0;
 
-        // FIXED POINT SETUP (16.16)
-        int32_t v_step_fp = (int32_t)(v_step * 65536.0f);
-        int32_t curr_v_fp = (int32_t)(curr_v * 65536.0f);
+        // OPTIMIZATION: Use direct pointers if surface is available
+        uint32_t *dest_pixels = (uint32_t *)dest->surface->pixels;
+        int dest_pitch = dest->surface->pitch >> 2;
+        uint32_t *tex_pixels = (uint32_t *)texture->surface->pixels;
+        int tex_pitch = texture->surface->pitch >> 2;
+        int tex_h = texture->height;
+        int tex_h_mask = tex_h - 1;
+        bool is_pot = (tex_h & tex_h_mask) == 0;
 
-        // UNSAFE OPTIMIZATION: Get pointer if possible
-        uint32_t *screen_ptr = NULL;
-        int pitch_ints = 0;
-        if (dest->surface) {
-          pitch_ints = dest->surface->pitch >> 2;
-          screen_ptr =
-              (uint32_t *)dest->surface->pixels + draw_top * pitch_ints + x;
-        }
+        uint32_t *screen_ptr = dest_pixels + draw_top * dest_pitch + x;
+        uint8_t *cov_ptr = g_wall_coverage + (ylookup[draw_top] + x);
+
+
+        // OPTIMIZATION: Pre-calculate fog once per column (Z is constant for vertical wall)
+        uint32_t wall_color = 0; 
+        bool use_fog = g_engine.fogOn;
 
         for (int y = draw_top; y <= draw_bot; y++) {
           int pixel_idx = ylookup[y] + x;
 
-          // TILING: Use modulo
-          int tex_y = (curr_v_fp >> 16) % texture->height;
-          if (tex_y < 0)
-            tex_y += texture->height;
-
-          uint32_t pixel;
-          if (tex_y == last_tex_y && g_engine.texture_quality == 0) {
-            pixel = cached_pixel;
-          } else {
-            if (g_engine.texture_quality == 1) {
-              pixel = ray_sample_texture_bilinear(texture, u, curr_v);
-            } else {
-              pixel = gr_get_pixel(texture, tex_x, tex_y);
-            }
-            last_tex_y = tex_y;
-            cached_pixel = pixel;
+          // EARLY Z-EXIT: Skip if occluded
+          if (z >= g_zbuffer[pixel_idx]) {
+            curr_v_fp += v_step_fp;
+            screen_ptr += dest_pitch;
+            cov_ptr += dest_pitch;
+            continue;
           }
 
-          if ((pixel & 0xff000000) != 0) {
-            // Z-Buffer check - ensures walls don't overdraw closer geometry
-            if (z < g_zbuffer[pixel_idx]) {
-              if (g_engine.fogOn)
-                pixel = ray_fog_pixel(pixel, z);
+          int tex_y = is_pot ? (curr_v_fp >> 16) & tex_h_mask : (curr_v_fp >> 16) % tex_h;
+          if (tex_y < 0) tex_y += tex_h;
 
-              if (sector->flags & 7) {
-                uint32_t bg = FAST_GET_PIXEL(dest, x, y);
-                pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
-              }
+          uint32_t pixel = tex_pixels[tex_y * tex_pitch + tex_x];
 
-              if (screen_ptr) {
-                *screen_ptr = pixel;
-              } else {
-                FAST_PUT_PIXEL(dest, x, y, pixel);
-              }
-              g_zbuffer[pixel_idx] = z;
-              g_wall_coverage[pixel_idx] = 1;
+          if ((pixel & 0xff000000) != 0) { // Transparency check
+            if (use_fog) pixel = ray_fog_pixel(pixel, z);
+
+            if (sector->flags & 7) {
+              uint32_t bg = *screen_ptr;
+              pixel = ((pixel & 0x00FEFEFE) >> 1) + ((bg & 0x00FEFEFE) >> 1);
             }
+
+            *screen_ptr = pixel;
+            g_zbuffer[pixel_idx] = z;
+            *cov_ptr = 1;
+            g_wall_col_depth[x] = z;
           }
           curr_v_fp += v_step_fp;
-          if (screen_ptr)
-            screen_ptr += pitch_ints;
+          screen_ptr += dest_pitch;
+          cov_ptr += dest_pitch;
         }
       } else if (draw_bot >= draw_top && y_bot > y_top) { // Solid fallback
         uint32_t color = 0xFF808080;
@@ -1098,7 +1049,7 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
       int y_window_top = y_near_top; // Default closed (if solid)
       int y_window_bot = y_near_bot;
 
-      bool is_portal = (near_wall && near_wall->portal_id != -1 && far_wall);
+      int is_portal = (near_wall && near_wall->portal_id != -1 && far_wall);
 
       if (is_portal) {
         draw_wall_far = far_wall;
@@ -1336,15 +1287,17 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
         }
       }
     }
+  }
+}
 
-    // Render a "Hole" stencil for nested non-solid sectors (Pits).
-    // It renders the "Ceiling" (Lid) of the nested sector but instead of
-    // drawing normally, it resets the Z-buffer to infinity (and optionally
-    // draws a transparency/grating texture). This allows the subsequent
-    // rendering of the pit's interior to be visible even if the parent sector
-    // has already drawn a floor over it.
-    void render_hole_stencil(GRAPH * dest, int sector_id, int min_x,
-                             int max_x) {
+// Render a "Hole" stencil for nested non-solid sectors (Pits).
+// It renders the "Ceiling" (Lid) of the nested sector but instead of
+// drawing normally, it resets the Z-buffer to infinity (and optionally
+// draws a transparency/grating texture). This allows the subsequent
+// rendering of the pit's interior to be visible even if the parent sector
+// has already drawn a floor over it.
+static void render_hole_stencil(GRAPH * dest, int sector_id, int min_x,
+                         int max_x) {
       if (sector_id < 0 || sector_id >= g_engine.num_sectors)
         return;
       RAY_Sector *sector = &g_engine.sectors[sector_id];
@@ -1473,8 +1426,8 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
       }
     }
 
-    // Render Solid Lids (Top/Bottom caps for solid boxes)
-    void render_solid_lids(GRAPH * dest, int sector_id, int min_x, int max_x) {
+// Render Solid Lids (Top/Bottom caps for solid boxes)
+static void render_solid_lids(GRAPH * dest, int sector_id, int min_x, int max_x) {
       if (sector_id < 0 || sector_id >= g_engine.num_sectors)
         return;
       RAY_Sector *sector = &g_engine.sectors[sector_id];
@@ -2086,12 +2039,13 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
                     }
                   }
                 }
-              }
+              } // closes if (cny_bot_next < cy_bot_curr)
+            } // closes for (int x = draw_x1; x <= draw_x2; x++)
 
-              // OPTIMIZATION: Vertical Aperture Check (Dynamic PVS)
-              // If the "hole" is completely closed (umost > dmost) for the
-              // entire width, the portal is invisible. Skip recursion.
-              int portal_visible = 0;
+            // OPTIMIZATION: Vertical Aperture Check (Dynamic PVS)
+            // If the "hole" is completely closed (umost > dmost) for the
+            // entire width, the portal is invisible. Skip recursion.
+            int portal_visible = 0;
               for (int x = draw_x1; x <= draw_x2; x++) {
                 if (umost[x] <= dmost[x]) {
                   portal_visible = 1;
@@ -2287,6 +2241,7 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
             }
           }
         }
+    } // closes render_sector
 
         // Forward decl
         extern void ray_render_md2(GRAPH * dest, RAY_Sprite * sprite);
@@ -2298,7 +2253,7 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
         // ---------------------------------------------------------
         // BILLBOARD RENDERING (2D Sprites in 3D world)
         // ---------------------------------------------------------
-        void ray_render_billboard(GRAPH * dest, RAY_Sprite * s) {
+        static void ray_render_billboard(GRAPH * dest, RAY_Sprite * s) {
           if (!s || s->textureID <= 0)
             return;
 
@@ -2473,9 +2428,7 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
           for (int i = 0; i < g_engine.num_sprites; i++) {
             RAY_Sprite *s = &g_engine.sprites[i];
 
-            if (s->hidden)
-              continue;
-            if (s->cleanup)
+            if (!s->in_use || s->hidden || s->cleanup)
               continue;
 
             // Sector visibility check: find which sector this sprite is in
@@ -2698,7 +2651,3 @@ static void render_solid_sector(GRAPH *dest, int sector_id, int min_x,
             sectors_culled_pvs_total = 0;
           }
         }
-      }
-    }
-  }
-}

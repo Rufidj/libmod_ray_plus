@@ -209,6 +209,7 @@ typedef struct {
   int frameRate;
   int frame;
   int hidden; /* 1 si está oculto */
+  int in_use; /* 1 if slot is active, 0 if free */
   int jumping;
   float heightJumped;
   int rayhit; /* 1 si fue golpeado por un rayo */
@@ -492,6 +493,7 @@ extern int64_t libmod_ray_check_collision(INSTANCE *my, int64_t *params);
 /* Sprites dinámicos */
 extern int64_t libmod_ray_add_sprite(INSTANCE *my, int64_t *params);
 extern int64_t libmod_ray_remove_sprite(INSTANCE *my, int64_t *params);
+extern int64_t libmod_ray_get_sprite_frame(INSTANCE *my, int64_t *params);
 
 /* Spawn Flags */
 extern int64_t libmod_ray_set_flag(INSTANCE *my, int64_t *params);

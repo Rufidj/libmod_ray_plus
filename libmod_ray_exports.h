@@ -16,6 +16,8 @@
 DLCONSTANT __bgdexport(libmod_ray, constants_def)[] = {
     {"SPRITE_INVISIBLE", TYPE_INT, 1}, {NULL, 0, 0}};
 
+#endif
+
 DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
     FUNC("RAY_INIT", "IIII", TYPE_INT, libmod_ray_init),
     FUNC("RAY_SHUTDOWN", "", TYPE_INT, libmod_ray_shutdown),
@@ -82,6 +84,7 @@ DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
     FUNC("RAY_GET_SPRITE_X", "I", TYPE_FLOAT, libmod_ray_get_sprite_x),
     FUNC("RAY_GET_SPRITE_Y", "I", TYPE_FLOAT, libmod_ray_get_sprite_y),
     FUNC("RAY_GET_SPRITE_Z", "I", TYPE_FLOAT, libmod_ray_get_sprite_z),
+    FUNC("RAY_GET_SPRITE_ID", "I", TYPE_INT, libmod_ray_get_sprite_id),
     FUNC("RAY_GET_FLOOR_HEIGHT", "FF", TYPE_FLOAT, libmod_ray_get_floor_height),
     FUNC("RAY_GET_TAG_POINT", "ISPPP", TYPE_INT, libmod_ray_get_tag_point),
     FUNC("RAY_SET_TEXTURE_QUALITY", "I", TYPE_INT,
@@ -144,8 +147,6 @@ DLSYSFUNCS __bgdexport(libmod_ray, functions_exports)[] = {
     FUNC("RAY_GET_ANGLE", "II", TYPE_FLOAT, libmod_ray_get_angle),
     FUNC("RAY_GET_CAMERA_ANGLE", "I", TYPE_FLOAT, libmod_ray_get_camera_angle),
     FUNC(NULL, NULL, 0, NULL)};
-
-#endif
 
 /* Hooks del módulo */
 void __bgdexport(libmod_ray, module_initialize)();

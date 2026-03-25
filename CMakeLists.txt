@@ -8,7 +8,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "../../bin/")
 set(CMAKE_MODULE_PATH ../../cmake/Modules)
 
 # Buscar SDL2 (requerido por libbggfx)
-find_package(SDL2 REQUIRED)
+if(NOT EMSCRIPTEN)
+    find_package(SDL2 REQUIRED)
+endif()
 
 add_definitions(-D__LIBMOD_RAY ${EXTRA_CFLAGS})
 

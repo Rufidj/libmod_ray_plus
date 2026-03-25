@@ -79,10 +79,16 @@ int ray_save_map_v9(const char *filename) {
   /* 1. Header */
   RAY_MapHeader_v9 header;
   memcpy(header.magic, "RAYMAP\x1a", 8);
-  header.version = 28; /* Updated for fog support */
+  header.version = 34; /* Match Editor version */
   header.num_sectors = g_engine.num_sectors;
   header.num_portals = g_engine.num_portals;
-  header.num_sprites = g_engine.num_sprites;
+  
+  /* Count active sprites */
+  uint32_t active_sprites = 0;
+  for (int i = 0; i < g_engine.num_sprites; i++) {
+    if (g_engine.sprites[i].in_use) active_sprites++;
+  }
+  header.num_sprites = active_sprites;
   header.num_spawn_flags = g_engine.num_spawn_flags;
   header.camera_x = g_engine.camera.x;
   header.camera_y = g_engine.camera.y;
@@ -91,7 +97,19 @@ int ray_save_map_v9(const char *filename) {
   header.camera_pitch = g_engine.camera.pitch;
   header.skyTextureID = g_engine.skyTextureID;
 
-  fwrite(&header, sizeof(RAY_MapHeader_v9), 1, file);
+  /* Explicitly write header fields to avoid platform-dependent struct padding */
+  fwrite(header.magic, 8, 1, file);
+  fwrite(&header.version, 4, 1, file);
+  fwrite(&header.num_sectors, 4, 1, file);
+  fwrite(&header.num_portals, 4, 1, file);
+  fwrite(&header.num_sprites, 4, 1, file);
+  fwrite(&header.num_spawn_flags, 4, 1, file);
+  fwrite(&header.camera_x, 4, 1, file);
+  fwrite(&header.camera_y, 4, 1, file);
+  fwrite(&header.camera_z, 4, 1, file);
+  fwrite(&header.camera_rot, 4, 1, file);
+  fwrite(&header.camera_pitch, 4, 1, file);
+  fwrite(&header.skyTextureID, 4, 1, file);
 
   /* 2. Sectors */
   for (int i = 0; i < g_engine.num_sectors; i++) {
@@ -103,6 +121,17 @@ int ray_save_map_v9(const char *filename) {
     fwrite(&s->floor_texture_id, sizeof(int), 1, file);
     fwrite(&s->ceiling_texture_id, sizeof(int), 1, file);
     fwrite(&s->light_level, sizeof(int), 1, file);
+
+    /* v24+: Normal maps */
+    fwrite(&s->floor_normal_id, sizeof(int), 1, file);
+    fwrite(&s->ceiling_normal_id, sizeof(int), 1, file);
+
+    /* v22+: Sector flags */
+    fwrite(&s->flags, sizeof(int), 1, file);
+
+    /* v26+: Liquid settings */
+    fwrite(&s->liquid_intensity, sizeof(float), 1, file);
+    fwrite(&s->liquid_speed, sizeof(float), 1, file);
 
     /* v28+: Fog settings */
     fwrite(&s->fog_color_r, sizeof(float), 1, file);
@@ -135,9 +164,19 @@ int ray_save_map_v9(const char *filename) {
       fwrite(&wall->texture_split_z_upper, sizeof(float), 1, file);
       fwrite(&wall->portal_id, sizeof(int), 1, file);
       fwrite(&wall->flags, sizeof(int), 1, file);
+
+      /* v24+: Normal maps */
+      fwrite(&wall->texture_id_lower_normal, sizeof(int), 1, file);
+      fwrite(&wall->texture_id_middle_normal, sizeof(int), 1, file);
+      fwrite(&wall->texture_id_upper_normal, sizeof(int), 1, file);
     }
 
-    /* Removed: Hierarchy fields */
+    /* v9+: Hierarchy fields (parent and children) */
+    fwrite(&s->parent_sector_id, sizeof(int), 1, file);
+    fwrite(&s->num_children, sizeof(int), 1, file);
+    for (int c = 0; c < s->num_children; c++) {
+      fwrite(&s->child_sector_ids[c], sizeof(int), 1, file);
+    }
   }
 
   /* 3. Portals */
@@ -154,9 +193,11 @@ int ray_save_map_v9(const char *filename) {
     fwrite(&p->y2, sizeof(float), 1, file);
   }
 
-  /* 4. Sprites */
+  /* 4. Sprites (Active only) */
   for (int i = 0; i < g_engine.num_sprites; i++) {
     RAY_Sprite *s = &g_engine.sprites[i];
+    if (!s->in_use)
+      continue;
     fwrite(&s->textureID, sizeof(int), 1, file);
     fwrite(&s->x, sizeof(float), 1, file);
     fwrite(&s->y, sizeof(float), 1, file);
@@ -164,7 +205,6 @@ int ray_save_map_v9(const char *filename) {
     fwrite(&s->w, sizeof(int), 1, file);
     fwrite(&s->h, sizeof(int), 1, file);
     fwrite(&s->rot, sizeof(float), 1, file);
-    // NOTE: runtime fields like 'visible' or animation state are NOT saved
   }
 
   /* 5. Spawn Flags */
@@ -228,13 +268,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     g_engine.portals_capacity = header->num_portals;
   }
   g_engine.num_sprites = 0;
-  if (header->num_sprites > 0) {
-    if (g_engine.sprites)
-      free(g_engine.sprites);
-    g_engine.sprites =
-        (RAY_Sprite *)calloc(header->num_sprites, sizeof(RAY_Sprite));
-    g_engine.sprites_capacity = header->num_sprites;
-  }
+  g_engine.sprites = (RAY_Sprite *)calloc(RAY_MAX_SPRITES, sizeof(RAY_Sprite));
+  g_engine.sprites_capacity = RAY_MAX_SPRITES;
   g_engine.num_spawn_flags = 0;
   if (header->num_spawn_flags > 0) {
     if (g_engine.spawn_flags)
@@ -360,36 +395,28 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     }
     printf("RAY:   %d walls loaded\n", s->num_walls);
 
-    // Try to load hierarchy fields (may not exist in old maps)
-    // Check if there's more data to read
-    long current_pos = ftell(file);
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, current_pos, SEEK_SET);
+    /* v9+: Hierarchy fields (parent and children) */
+    if (map_version >= 9) {
+      if (fread(&s->parent_sector_id, sizeof(int), 1, file) == 1) {
+        (void)fread(&s->num_children, sizeof(int), 1, file);
 
-    // If there's enough data for hierarchy fields, read them
-    if (current_pos + sizeof(int) * 2 <= file_size) {
-      (void)fread(&s->parent_sector_id, sizeof(int), 1, file);
-      (void)fread(&s->num_children, sizeof(int), 1, file);
-
-      if (s->num_children > 0 &&
-          s->num_children < RAY_MAX_SECTORS) { // Sanity check
-        s->children_capacity = s->num_children;
-        s->child_sector_ids = (int *)malloc(s->num_children * sizeof(int));
-        for (int c = 0; c < s->num_children; c++) {
-          (void)fread(&s->child_sector_ids[c], sizeof(int), 1, file);
+        if (s->num_children > 0 && s->num_children < RAY_MAX_SECTORS) {
+          s->children_capacity = s->num_children;
+          s->child_sector_ids = (int *)malloc(s->num_children * sizeof(int));
+          for (int c = 0; c < s->num_children; c++) {
+            (void)fread(&s->child_sector_ids[c], sizeof(int), 1, file);
+          }
+          printf("RAY:   Sector %d: parent=%d, children=%d\n", s->sector_id,
+                 s->parent_sector_id, s->num_children);
+        } else {
+          s->parent_sector_id = -1;
+          s->child_sector_ids = NULL;
+          s->num_children = 0;
+          s->children_capacity = 0;
         }
-        printf("RAY:   Sector %d: parent=%d, children=%d\n", s->sector_id,
-               s->parent_sector_id, s->num_children);
-      } else {
-        // Invalid data, reset to defaults
-        s->parent_sector_id = -1;
-        s->child_sector_ids = NULL;
-        s->num_children = 0;
-        s->children_capacity = 0;
       }
     } else {
-      // Old map format without hierarchy
+      /* Old map format without hierarchy */
       s->parent_sector_id = -1;
       s->child_sector_ids = NULL;
       s->num_children = 0;
@@ -453,25 +480,66 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
   g_engine.num_portals = header->num_portals;
 
   /* 5. Sprites */
+  // Clear all previous sprites to prevent ghosts
+  for (int i = 0; i < RAY_MAX_SPRITES; i++) {
+    g_engine.sprites[i].in_use = 0;
+    g_engine.sprites[i].model = NULL;
+    g_engine.sprites[i].cleanup = 0;
+  }
   for (int i = 0; i < header->num_sprites; i++) {
     RAY_Sprite *s = &g_engine.sprites[i];
-    (void)fread(&s->textureID, sizeof(int), 1, file);
+
+    // Read initial data
+    if (fread(&s->textureID, sizeof(int), 1, file) != 1)
+      break;
     (void)fread(&s->x, sizeof(float), 1, file);
     (void)fread(&s->y, sizeof(float), 1, file);
     (void)fread(&s->z, sizeof(float), 1, file);
     (void)fread(&s->w, sizeof(int), 1, file);
     (void)fread(&s->h, sizeof(int), 1, file);
     (void)fread(&s->rot, sizeof(float), 1, file);
+
+    // CRITICAL FIX: Verify data sanity to prevent ghosts from corrupted
+    // maps
+    if (isnan(s->x) || isnan(s->y) || isnan(s->z) || isinf(s->x) ||
+        isinf(s->y) || isinf(s->z) || s->textureID <= 0 ||
+        s->textureID > 30000) {
+      s->in_use = 0;
+      s->x = 0;
+      s->y = 0;
+      s->z = 0;
+    } else {
+      s->in_use = 1;
+    }
+
+    s->cleanup = 0;
+    s->hidden = 0;
+    s->flags = 0;
+    s->model_scale = 1.0f;
+    s->process_ptr = NULL; // Explicitly clear to prevent logic corruption
+    s->model = NULL;
+    s->physics = NULL;
   }
   g_engine.num_sprites = header->num_sprites;
 
   /* 6. Spawn Flags */
   for (int i = 0; i < header->num_spawn_flags; i++) {
     RAY_SpawnFlag *f = &g_engine.spawn_flags[i];
-    (void)fread(&f->flag_id, sizeof(int), 1, file);
+    if (fread(&f->flag_id, sizeof(int), 1, file) != 1)
+      break;
     (void)fread(&f->x, sizeof(float), 1, file);
     (void)fread(&f->y, sizeof(float), 1, file);
     (void)fread(&f->z, sizeof(float), 1, file);
+
+    // Sanitize coordinates
+    if (isnan(f->x) || isnan(f->y) || isnan(f->z) || isinf(f->x) ||
+        isinf(f->y) || isinf(f->z)) {
+      f->x = 0;
+      f->y = 0;
+      f->z = 0;
+    }
+    f->process_ptr = NULL;
+    f->occupied = 0;
   }
   g_engine.num_spawn_flags = header->num_spawn_flags;
 
@@ -479,17 +547,17 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
   printf("RAY: Auto-detecting portals between sectors...\n");
   printf("RAY: Preserving %d manual portals from file\n", g_engine.num_portals);
 
-  // NOTE: We do NOT clear portals here - we preserve manual portals from the
-  // file and add auto-detected ones for shared walls
+  // NOTE: We do NOT clear portals here - we preserve manual portals from
+  // the file and add auto-detected ones for shared walls
 
   ray_detect_all_shared_walls();
-  // ray_detect_nested_sectors();  // DISABLED: Build Engine doesn't auto-create
-  // portals for nested sectors
+  // ray_detect_nested_sectors();  // DISABLED: Build Engine doesn't
+  // auto-create portals for nested sectors
   printf("RAY: Portal detection complete. Total portals: %d\n",
          g_engine.num_portals);
 
-  /* 8. Reconstruct hierarchy (Handles nested sectors for maps that don't save
-   * it) */
+  /* 8. Reconstruct hierarchy (Handles nested sectors for maps that don't
+   * save it) */
   ray_reconstruct_hierarchy();
 
   /* 9. Override camera with first spawn flag (car position) if available */
@@ -548,7 +616,8 @@ int ray_load_map_v9(FILE *file, RAY_MapHeader_v9 *header) {
     /* The lights section is at the end:
      * [num_lights: 4 bytes][light0: 36 bytes][light1: 36 bytes]...
      * So we read num_lights from (file_end - 4 - N*36)
-     * But we don't know N yet. Read the num_lights first by trying end-4. */
+     * But we don't know N yet. Read the num_lights first by trying end-4.
+     */
 
     /* First, read the candidate num_lights from different positions.
      * Strategy: seek to positions where num_lights COULD be, check if the
@@ -618,10 +687,22 @@ int ray_load_map(const char *filename) {
     return 0;
 
   RAY_MapHeader_v9 header;
-  if (fread(&header, sizeof(RAY_MapHeader_v9), 1, file) != 1) {
+  /* Explicitly read header fields to ensure cross-platform binary compatibility */
+  if (fread(header.magic, 8, 1, file) != 1) {
     fclose(file);
     return 0;
   }
+  (void)fread(&header.version, 4, 1, file);
+  (void)fread(&header.num_sectors, 4, 1, file);
+  (void)fread(&header.num_portals, 4, 1, file);
+  (void)fread(&header.num_sprites, 4, 1, file);
+  (void)fread(&header.num_spawn_flags, 4, 1, file);
+  (void)fread(&header.camera_x, 4, 1, file);
+  (void)fread(&header.camera_y, 4, 1, file);
+  (void)fread(&header.camera_z, 4, 1, file);
+  (void)fread(&header.camera_rot, 4, 1, file);
+  (void)fread(&header.camera_pitch, 4, 1, file);
+  (void)fread(&header.skyTextureID, 4, 1, file);
 
   printf("RAY: Detected map version: %u\n", header.version);
 
@@ -639,11 +720,12 @@ int ray_load_map(const char *filename) {
            header.version);
   }
 
-  // Reset file pointer to start of file for ray_load_map_v9 to read properly?
-  // No, ray_load_map_v9 takes 'header' as argument and assumes file is
-  // positioned AFTER header? Let's check ray_load_map_v9 implementation. It
-  // takes 'header' pointer. It does NOT read header again. It proceeds to read
-  // Sectors. IF v23 header size == v9 header size, we are fine.
+  // Reset file pointer to start of file for ray_load_map_v9 to read
+  // properly? No, ray_load_map_v9 takes 'header' as argument and assumes
+  // file is positioned AFTER header? Let's check ray_load_map_v9
+  // implementation. It takes 'header' pointer. It does NOT read header
+  // again. It proceeds to read Sectors. IF v23 header size == v9 header
+  // size, we are fine.
 
   int result = ray_load_map_v9(file, &header);
   fclose(file);
@@ -875,8 +957,8 @@ static int split_wall_for_portal(RAY_Sector *sector, int wall_idx,
   }
 }
 
-/* Detect walls shared between ANY two sectors and create portals (Build Engine
- * style) */
+/* Detect walls shared between ANY two sectors and create portals (Build
+ * Engine style) */
 static void ray_detect_all_shared_walls(void) {
   int portals_created = 0;
 
@@ -955,8 +1037,8 @@ static void ray_detect_all_shared_walls(void) {
             portal_wall_a->portal_id = new_portal->portal_id;
             portal_wall_b->portal_id = new_portal->portal_id;
 
-            /* Auto-assign step textures from main wall texture (Build Engine
-             * style) */
+            /* Auto-assign step textures from main wall texture (Build
+             * Engine style) */
             if (portal_wall_a->texture_id_upper == 0) {
               portal_wall_a->texture_id_upper =
                   portal_wall_a->texture_id_middle;
@@ -1002,8 +1084,8 @@ static void ray_detect_all_shared_walls(void) {
   printf("RAY: Created %d automatic portals\n", portals_created);
 }
 
-/* Detect nested sectors (sectors completely inside other sectors) and rebuild
- * parent-child links */
+/* Detect nested sectors (sectors completely inside other sectors) and
+ * rebuild parent-child links */
 static void ray_reconstruct_hierarchy(void) {
   printf("RAY: Reconstructing sector hierarchy...\n");
 
@@ -1020,7 +1102,8 @@ static void ray_reconstruct_hierarchy(void) {
     s->children_capacity = 0;
   }
 
-  // 2. For each sector, find the smallest sector that completely contains it
+  // 2. For each sector, find the smallest sector that completely contains
+  // it
   for (int i = 0; i < g_engine.num_sectors; i++) {
     RAY_Sector *child = &g_engine.sectors[i];
     int best_parent = -1;
@@ -1080,7 +1163,8 @@ static void ray_reconstruct_hierarchy(void) {
   printf("RAY: Hierarchy reconstruction complete. %d nested sectors found.\n",
          nested_count);
 }
-/* Detect walls shared between parent and child sectors and create portals */
+/* Detect walls shared between parent and child sectors and create portals
+ */
 
 /* ============================================================================
    MAP SAVING

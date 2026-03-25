@@ -10,6 +10,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "dlvaracc.h"
+#include "dcb.h"
+
+/* Standard BennuGD2 Local Variable Indices (from libbggfx) */
+#ifndef COORDX
+#define COORDX 2
+#define COORDY 3
+#define ANGLE  8
+#define PROCESS_ID 129
+#endif
+
+extern DLVARFIXUP __bgdexport( libbggfx, locals_fixup )[];
+
+
+/* Dynamic Local Variable IDs (for syncing with BennuGD processes) */
+int id_x = -1;
+int id_y = -1;
+int id_z = -1;
+int id_angle = -1;
+int id_res = -1;
 
 /* ============================================================================
    ESTADO GLOBAL DEL MOTOR
@@ -32,7 +52,7 @@ extern void ray_render_frame_portal_simple(GRAPH *dest);
 extern void
 ray_render_frame_build(GRAPH *dest);          /* Build Engine style renderer */
 extern void ray_render_frame_gpu(void *dest); /* GPU renderer */
-static int g_use_gpu = 1;                     // Default: Software
+static int g_use_gpu = 1;                     // 1=GPU (vitagl/SDL_gpu), 0=Software (Build Engine)
 
 extern void ray_detect_portals(RAY_Engine *engine);
 extern int ray_check_collision(RAY_Engine *engine, float x, float y, float z,
@@ -48,6 +68,15 @@ int64_t libmod_ray_init(INSTANCE *my, int64_t *params) {
   int screen_h = (int)params[1];
   int fov = (int)params[2];
   int strip_width = (int)params[3];
+
+  /* Resolve dynamic local variable IDs once */
+  if (id_x == -1) {
+    id_x = getid("x");
+    id_y = getid("y");
+    id_z = getid("z");
+    id_angle = getid("angle");
+    id_res = getid("resolution");
+  }
 
   if (g_engine.initialized) {
     fprintf(stderr, "RAY: Motor ya inicializado\n");
@@ -308,6 +337,28 @@ static void ray_bake_pvs_recursive(int source_id, int current_id, int depth,
   }
 }
 
+// Helper function to recursively mark all descendants as visible
+static void mark_descendants_visible(int ancestor_idx, int descendant_idx) {
+  // Mark ancestor->descendant as visible
+  g_engine.pvs_matrix[ancestor_idx * g_engine.num_sectors + descendant_idx] = 1;
+  // Mark descendant->ancestor as visible (bidirectional)
+  g_engine.pvs_matrix[descendant_idx * g_engine.num_sectors + ancestor_idx] = 1;
+
+  // Recursively mark all children of this descendant
+  RAY_Sector *desc_sector = &g_engine.sectors[descendant_idx];
+  for (int c = 0; c < desc_sector->num_children; c++) {
+    int child_id = desc_sector->child_sector_ids[c];
+
+    // Find child index
+    for (int j = 0; j < g_engine.num_sectors; j++) {
+      if (g_engine.sectors[j].sector_id == child_id) {
+        mark_descendants_visible(ancestor_idx, j);
+        break;
+      }
+    }
+  }
+}
+
 void ray_bake_pvs() {
   if (g_engine.num_sectors == 0)
     return;
@@ -346,29 +397,7 @@ void ray_bake_pvs() {
   // This ensures nested sectors are always visible from their parent
   // We need to do this TRANSITIVELY - grandparents can see grandchildren, etc.
 
-  // Helper function to recursively mark all descendants as visible
-  void mark_descendants_visible(int ancestor_idx, int descendant_idx) {
-    // Mark ancestor->descendant as visible
-    g_engine.pvs_matrix[ancestor_idx * g_engine.num_sectors + descendant_idx] =
-        1;
-    // Mark descendant->ancestor as visible (bidirectional)
-    g_engine.pvs_matrix[descendant_idx * g_engine.num_sectors + ancestor_idx] =
-        1;
 
-    // Recursively mark all children of this descendant
-    RAY_Sector *desc_sector = &g_engine.sectors[descendant_idx];
-    for (int c = 0; c < desc_sector->num_children; c++) {
-      int child_id = desc_sector->child_sector_ids[c];
-
-      // Find child index
-      for (int j = 0; j < g_engine.num_sectors; j++) {
-        if (g_engine.sectors[j].sector_id == child_id) {
-          mark_descendants_visible(ancestor_idx, j);
-          break;
-        }
-      }
-    }
-  }
 
   for (int i = 0; i < g_engine.num_sectors; i++) {
     RAY_Sector *sector = &g_engine.sectors[i];
@@ -404,7 +433,7 @@ int64_t libmod_ray_load_map(INSTANCE *my, int64_t *params) {
     return 0;
   }
 
-  const char *filename = string_get((int)params[0]);
+  const char *filename = (const char *)string_get((int)params[0]);
   int fpg_id = (int)params[1];
 
   g_engine.fpg_id = fpg_id;
@@ -545,6 +574,17 @@ int64_t libmod_ray_get_sprite_z(INSTANCE *my, int64_t *params) {
   return (int64_t) * (int32_t *)&val;
 }
 
+int64_t libmod_ray_get_sprite_id(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return 0;
+  int id = (int)params[0];
+  if (id < 0 || id >= g_engine.num_sprites)
+    return 0;
+  if (g_engine.sprites[id].process_ptr == NULL)
+    return 0;
+  return (int64_t)LOCQWORD(libbggfx, g_engine.sprites[id].process_ptr, PROCESS_ID);
+}
+
 /* ============================================================================
    CÁMARA - SETTER
    ============================================================================
@@ -554,11 +594,20 @@ int64_t libmod_ray_set_camera(INSTANCE *my, int64_t *params) {
   if (!g_engine.initialized)
     return 0;
 
-  float x = *(float *)&params[0];
-  float y = *(float *)&params[1];
-  float z = *(float *)&params[2];
-  float rot = *(float *)&params[3];
-  float pitch = *(float *)&params[4];
+  float x = 0.0f, y = 0.0f, z = 0.0f, rot = 0.0f, pitch = 0.0f;
+  
+  /* Safely extract floats from int64_t parameters */
+  memcpy(&x, &params[0], 4);
+  memcpy(&y, &params[1], 4);
+  memcpy(&z, &params[2], 4);
+  memcpy(&rot, &params[3], 4);
+  memcpy(&pitch, &params[4], 4);
+
+  /* Automatic angle conversion: BennuGD millidegrees (0-360000) or degrees */
+  if (fabsf(rot) > 1000.0f)
+    rot = rot * M_PI / 180000.0f;
+  else if (fabsf(rot) > 2.0f * M_PI)
+    rot = rot * M_PI / 180.0f;
 
   g_engine.camera.x = x;
   g_engine.camera.y = y;
@@ -859,6 +908,25 @@ int64_t libmod_ray_render(INSTANCE *my, int64_t *params) {
 
   for (int i = 0; i < g_engine.num_sprites; ++i) {
     RAY_Sprite *s = &g_engine.sprites[i];
+    if (!s->in_use) continue;
+
+    /* Automatic Sync from BennuGD Process if attached */
+    if (s->process_ptr) {
+        /* Use standard macros for robust cross-platform variable access */
+        double res = (id_res != -1) ? LOCDOUBLE(libbggfx, s->process_ptr, id_res) : 1.0;
+        if (res <= 0.0) res = 1.0;
+
+        if (id_x != -1) s->x = (float)(LOCDOUBLE(libbggfx, s->process_ptr, id_x) / res);
+        if (id_y != -1) s->y = (float)(LOCDOUBLE(libbggfx, s->process_ptr, id_y) / res);
+        if (id_z != -1) s->z = (float)(LOCDOUBLE(libbggfx, s->process_ptr, id_z) / res);
+        
+        if (id_angle != -1) {
+            double b_angle = LOCDOUBLE(libbggfx, s->process_ptr, id_angle);
+            /* Sync Angle: BennuGD 'angle' is millidegrees (0-360000) */
+            s->rot = (float)((double)b_angle * M_PI / 180000.0);
+        }
+    }
+
     if (s->glb_anim_speed != 0) {
       s->glb_anim_time += dt * s->glb_anim_speed;
     }
@@ -971,6 +1039,15 @@ int64_t libmod_ray_add_sprite(INSTANCE *my, int64_t *params) {
   if (!g_engine.initialized)
     return 0;
 
+  /* Resolve dynamic local variable IDs if not already done */
+  if (id_x == -1) {
+    id_x = getid("x");
+    id_y = getid("y");
+    id_z = getid("z");
+    id_angle = getid("angle");
+    id_res = getid("resolution");
+  }
+
   float x = *(float *)&params[0];
   float y = *(float *)&params[1];
   float z = *(float *)&params[2];
@@ -980,12 +1057,26 @@ int64_t libmod_ray_add_sprite(INSTANCE *my, int64_t *params) {
   int h = (int)params[6];
   int flags = (int)params[7];
 
-  if (g_engine.num_sprites >= g_engine.sprites_capacity) {
-    fprintf(stderr, "RAY: Máximo de sprites alcanzado\n");
-    return -1;
+  /* Look for an empty slot first to reuse */
+  int slot = -1;
+  for (int i = 0; i < g_engine.num_sprites; i++) {
+    if (!g_engine.sprites[i].in_use) {
+      slot = i;
+      break;
+    }
   }
 
-  RAY_Sprite *sprite = &g_engine.sprites[g_engine.num_sprites];
+  /* If no empty slot found, check if we can expand num_sprites */
+  if (slot == -1) {
+    if (g_engine.num_sprites >= g_engine.sprites_capacity) {
+      fprintf(stderr, "RAY: Máximo de sprites alcanzado\n");
+      return -1;
+    }
+    slot = g_engine.num_sprites;
+    g_engine.num_sprites++;
+  }
+
+  RAY_Sprite *sprite = &g_engine.sprites[slot];
   memset(sprite, 0, sizeof(RAY_Sprite));
 
   sprite->x = x;
@@ -1002,11 +1093,11 @@ int64_t libmod_ray_add_sprite(INSTANCE *my, int64_t *params) {
   sprite->flag_id = -1;
   sprite->model_scale = 1.0f;  // Default scale
   sprite->glb_anim_index = -1; // Default: no animation
+  sprite->glb_anim_time = 0.0f;
   sprite->glb_anim_speed = 0.0f;
+  sprite->in_use = 1;
 
-  g_engine.num_sprites++;
-
-  return g_engine.num_sprites - 1;
+  return slot;
 }
 
 int64_t libmod_ray_remove_sprite(INSTANCE *my, int64_t *params) {
@@ -1020,8 +1111,24 @@ int64_t libmod_ray_remove_sprite(INSTANCE *my, int64_t *params) {
   }
 
   g_engine.sprites[sprite_id].cleanup = 1;
+  g_engine.sprites[sprite_id].in_use = 0; // Mark as reusable immediately
 
   return 1;
+}
+
+/* Returns the current frame index being displayed for a sprite's MD3 animation.
+   Useful for frame-accurate hit detection: fire damage only when
+   the animation is at the 'punch' frame, not just when in proximity. */
+int64_t libmod_ray_get_sprite_frame(INSTANCE *my, int64_t *params) {
+  if (!g_engine.initialized)
+    return -1;
+
+  int sprite_id = (int)params[0];
+  if (sprite_id < 0 || sprite_id >= g_engine.num_sprites)
+    return -1;
+
+  // currentFrame is the 'from' frame used by the MD3/MD2 renderer
+  return (int64_t)g_engine.sprites[sprite_id].currentFrame;
 }
 
 int64_t libmod_ray_update_sprite_position(INSTANCE *my, int64_t *params) {
@@ -1029,9 +1136,11 @@ int64_t libmod_ray_update_sprite_position(INSTANCE *my, int64_t *params) {
     return 0;
 
   int sprite_id = (int)params[0];
-  float x = *(float *)&params[1];
-  float y = *(float *)&params[2];
-  float z = *(float *)&params[3];
+  float x = 0.0f, y = 0.0f, z = 0.0f;
+  
+  memcpy(&x, &params[1], 4);
+  memcpy(&y, &params[2], 4);
+  memcpy(&z, &params[3], 4);
 
   if (sprite_id < 0 || sprite_id >= g_engine.num_sprites) {
     return 0;
@@ -1172,7 +1281,7 @@ int64_t libmod_ray_toggle_door(INSTANCE *my, int64_t *params) {
 #include "libmod_ray_md3.h"
 
 int64_t libmod_ray_load_md2(INSTANCE *my, int64_t *params) {
-  const char *filename = string_get((int)params[0]);
+  const char *filename = (const char *)string_get((int)params[0]);
   RAY_MD2_Model *model = ray_md2_load(filename);
   string_discard((int)params[0]);
   if (!model)
@@ -1181,7 +1290,7 @@ int64_t libmod_ray_load_md2(INSTANCE *my, int64_t *params) {
 }
 
 int64_t libmod_ray_load_md3(INSTANCE *my, int64_t *params) {
-  const char *filename = string_get((int)params[0]);
+  const char *filename = (const char *)string_get((int)params[0]);
   RAY_MD3_Model *model = ray_md3_load(filename);
   string_discard((int)params[0]);
   if (!model)
@@ -1190,7 +1299,7 @@ int64_t libmod_ray_load_md3(INSTANCE *my, int64_t *params) {
 }
 
 int64_t libmod_ray_load_gltf(INSTANCE *my, int64_t *params) {
-  const char *filename = string_get((int)params[0]);
+  const char *filename = (const char *)string_get((int)params[0]);
   RAY_GLTF_Model *model = ray_gltf_load(filename);
   string_discard((int)params[0]);
   if (!model)
@@ -1338,7 +1447,7 @@ int64_t libmod_ray_get_md3_tag(INSTANCE *my, int64_t *params) {
   if (!g_engine.initialized)
     return 0;
   int sprite_id = (int)params[0];
-  const char *tag_name = string_get(params[1]);
+  const char *tag_name = (const char *)string_get(params[1]);
   float *out_x = (float *)(intptr_t)params[2];
   float *out_y = (float *)(intptr_t)params[3];
   float *out_z = (float *)(intptr_t)params[4];
@@ -1495,7 +1604,7 @@ int64_t libmod_ray_get_tag_point(INSTANCE *my, int64_t *params) {
     return 0;
 
   int sprite_id = (int)params[0];
-  const char *tag_name = string_get((int)params[1]);
+  const char *tag_name = (const char *)string_get((int)params[1]);
   int *ptr_x = (int *)params[2]; // Pointers to FLOAT variables
   int *ptr_y = (int *)params[3];
   int *ptr_z = (int *)params[4];
@@ -1643,14 +1752,14 @@ int64_t libmod_ray_get_collision(INSTANCE *my, int64_t *params) {
     return -1;
 
   RAY_Sprite *s1 = &g_engine.sprites[sprite_id];
-  if (s1->cleanup)
+  if (!s1->in_use || s1->cleanup)
     return -1;
 
   for (int i = 0; i < g_engine.num_sprites; i++) {
     if (i == sprite_id)
       continue;
     RAY_Sprite *s2 = &g_engine.sprites[i];
-    if (s2->cleanup || s2->hidden)
+    if (!s2->in_use || s2->cleanup || s2->hidden)
       continue;
 
     // Check intersection (Simple AABB)
@@ -1693,7 +1802,7 @@ int64_t libmod_ray_set_sprite_graph(INSTANCE *my, int64_t *params) {
 }
 
 int64_t libmod_ray_camera_load(INSTANCE *my, int64_t *params) {
-  const char *filename = string_get((int)params[0]);
+  const char *filename = (const char *)string_get((int)params[0]);
   int id = ray_camera_load_path(filename);
   string_discard((int)params[0]);
   return id;
@@ -1813,7 +1922,7 @@ int64_t libmod_ray_move_sprite(INSTANCE *my, int64_t *params) {
     return 0;
 
   RAY_Sprite *s = &g_engine.sprites[sprite_id];
-  if (s->cleanup)
+  if (!s->in_use || s->cleanup)
     return 0;
 
   // Si step_h es 0 o negativo, usar el valor por defecto del motor
